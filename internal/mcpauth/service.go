@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -50,15 +51,26 @@ func (s *Service) Validate() error {
 }
 
 func (s *Service) AuthorizeURL(ctx context.Context, teamID string, slackUserID string, requestID string, scopeHint string, resourceMetadataURL string) (string, error) {
+	slog.Debug("mcpauth authorize start",
+		"mcp_server", s.MCPServer,
+		"team_id", teamID,
+		"user_id", slackUserID,
+		"request_id", requestID,
+		"scope_hint", scopeHint,
+		"resource_metadata_url_present", strings.TrimSpace(resourceMetadataURL) != "",
+	)
 	if err := s.Validate(); err != nil {
+		slog.Debug("mcpauth authorize validate failed", "mcp_server", s.MCPServer, "error", err)
 		return "", err
 	}
 	md, err := s.discoverProtectedResourceMetadata(ctx, resourceMetadataURL)
 	if err != nil {
 		fallbackIssuer := strings.TrimSpace(s.Registration.AuthorizationServerIssuer)
 		if fallbackIssuer == "" {
+			slog.Debug("mcpauth authorize protected resource discovery failed without fallback", "mcp_server", s.MCPServer, "error", err)
 			return "", err
 		}
+		slog.Debug("mcpauth authorize using protected resource fallback issuer", "mcp_server", s.MCPServer, "fallback_issuer", fallbackIssuer)
 		md = &ProtectedResourceMetadata{
 			Resource:             s.ResourceURL,
 			AuthorizationServers: []string{fallbackIssuer},
@@ -68,8 +80,10 @@ func (s *Service) AuthorizeURL(ctx context.Context, teamID string, slackUserID s
 
 	as, err := s.discoverAuthorizationServerMetadata(ctx, md.AuthorizationServers[0])
 	if err != nil {
+		slog.Debug("mcpauth authorize auth server discovery failed", "mcp_server", s.MCPServer, "issuer", md.AuthorizationServers[0], "error", err)
 		return "", err
 	}
+	slog.Debug("mcpauth authorize auth server resolved", "mcp_server", s.MCPServer, "issuer", as.Issuer, "authorization_endpoint", as.AuthorizationEndpoint, "token_endpoint", as.TokenEndpoint)
 	clientID := strings.TrimSpace(s.Registration.ClientID)
 	if clientID == "" {
 		return "", fmt.Errorf("registration client id is required")
@@ -95,6 +109,7 @@ func (s *Service) AuthorizeURL(ctx context.Context, teamID string, slackUserID s
 	}
 
 	scope := scopeString(scopeHint, firstNonEmptySlice(s.Registration.Scopes, md.ScopesSupported))
+	slog.Debug("mcpauth authorize pending auth stored", "mcp_server", s.MCPServer, "nonce", st.Nonce, "scope", scope, "resource", st.Resource, "issuer", st.ASIssuer)
 	s.putPending(pendingAuth{
 		Nonce:         st.Nonce,
 		CreatedAt:     time.Now().UTC(),
@@ -116,32 +131,45 @@ func (s *Service) AuthorizeURL(ctx context.Context, teamID string, slackUserID s
 		"resource":              st.Resource,
 		"scope":                 scope,
 	}
-	return setURLQuery(as.AuthorizationEndpoint, params)
+	u, err := setURLQuery(as.AuthorizationEndpoint, params)
+	if err != nil {
+		return "", err
+	}
+	slog.Debug("mcpauth authorize url generated", "mcp_server", s.MCPServer, "redirect_uri", s.redirectURI(), "authorization_url", u)
+	return u, nil
 }
 
 func (s *Service) ExchangeCallback(ctx context.Context, code string, rawState string) (*OAuthState, error) {
+	slog.Debug("mcpauth callback exchange start", "mcp_server", s.MCPServer, "code_len", len(code), "state_len", len(rawState))
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
 	st, err := parseAndVerifyState(s.StateHMACKey, rawState)
 	if err != nil {
+		slog.Debug("mcpauth callback state verify failed", "mcp_server", s.MCPServer, "error", err)
 		return nil, err
 	}
+	slog.Debug("mcpauth callback state verified", "mcp_server", s.MCPServer, "nonce", st.Nonce, "team_id", st.SlackTeamID, "user_id", st.SlackUserID, "resource", st.Resource, "issuer", st.ASIssuer)
 	pending, ok := s.popPending(st.Nonce)
 	if !ok {
+		slog.Debug("mcpauth callback pending auth missing", "mcp_server", s.MCPServer, "nonce", st.Nonce)
 		return nil, fmt.Errorf("authorization state was not found or expired")
 	}
 	if pending.Resource != st.Resource || pending.Issuer != st.ASIssuer {
+		slog.Debug("mcpauth callback pending auth mismatch", "mcp_server", s.MCPServer, "pending_resource", pending.Resource, "state_resource", st.Resource, "pending_issuer", pending.Issuer, "state_issuer", st.ASIssuer)
 		return nil, fmt.Errorf("state resource/issuer mismatch")
 	}
 	as, err := s.discoverAuthorizationServerMetadata(ctx, st.ASIssuer)
 	if err != nil {
+		slog.Debug("mcpauth callback auth server discovery failed", "mcp_server", s.MCPServer, "issuer", st.ASIssuer, "error", err)
 		return nil, err
 	}
 	tokenRes, err := s.exchangeToken(ctx, as.TokenEndpoint, pending, code)
 	if err != nil {
+		slog.Debug("mcpauth callback token exchange failed", "mcp_server", s.MCPServer, "token_endpoint", as.TokenEndpoint, "error", err)
 		return nil, err
 	}
+	slog.Debug("mcpauth callback token exchange succeeded", "mcp_server", s.MCPServer, "expires_at", tokenRes.ExpiresAt, "has_refresh_token", tokenRes.RefreshToken != "")
 
 	encAccess, err := s.Cipher.EncryptToBase64(tokenRes.AccessToken)
 	if err != nil {
@@ -175,8 +203,10 @@ func (s *Service) ExchangeCallback(ctx context.Context, code string, rawState st
 		record.CreatedAt = now
 	}
 	if err := s.Store.PutDelegatedOAuthToken(ctx, record); err != nil {
+		slog.Debug("mcpauth callback token persistence failed", "mcp_server", s.MCPServer, "team_id", st.SlackTeamID, "user_id", st.SlackUserID, "error", err)
 		return nil, err
 	}
+	slog.Debug("mcpauth callback token persisted", "mcp_server", s.MCPServer, "team_id", st.SlackTeamID, "user_id", st.SlackUserID, "expires_at", record.ExpiresAt)
 	return &st, nil
 }
 
@@ -208,6 +238,7 @@ func (s *Service) exchangeToken(ctx context.Context, endpoint string, pending pe
 	Scope        string
 	ExpiresAt    time.Time
 }, error) {
+	slog.Debug("mcpauth token exchange request", "mcp_server", s.MCPServer, "endpoint", endpoint, "client_id", pending.ClientID, "has_client_secret", pending.ClientSecret != "", "resource", pending.Resource)
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
@@ -225,6 +256,7 @@ func (s *Service) exchangeToken(ctx context.Context, endpoint string, pending pe
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := s.httpClient().Do(req)
 	if err != nil {
+		slog.Debug("mcpauth token exchange http failed", "mcp_server", s.MCPServer, "endpoint", endpoint, "error", err)
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -233,6 +265,7 @@ func (s *Service) exchangeToken(ctx context.Context, endpoint string, pending pe
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		slog.Debug("mcpauth token exchange non-success status", "mcp_server", s.MCPServer, "status", resp.StatusCode)
 		return nil, fmt.Errorf("token exchange failed with status %d", resp.StatusCode)
 	}
 	var tr tokenResponse
@@ -246,6 +279,7 @@ func (s *Service) exchangeToken(ctx context.Context, endpoint string, pending pe
 		tr.Scope = values.Get("scope")
 	}
 	if tr.AccessToken == "" {
+		slog.Debug("mcpauth token exchange empty access token", "mcp_server", s.MCPServer)
 		return nil, fmt.Errorf("provider returned empty access token")
 	}
 	expiresAt := time.Now().Add(time.Hour)

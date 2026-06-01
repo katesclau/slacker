@@ -112,6 +112,7 @@ func main() {
 		ChatCommand:   cfg.Slack.ChatCommand,
 		ConfigCommand: cfg.Slack.ConfigCommand,
 		AdminUsers:    cfg.Slack.AdminUsers,
+		PublicBaseURL: cfg.App.PublicBaseURL,
 	}, log, repo, memorySvc, blockTools, agentRuntime)
 
 	errCh := make(chan error, 2)

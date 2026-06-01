@@ -17,6 +17,8 @@ import (
 	"google.golang.org/genai"
 )
 
+const appUserID = "slacker-app-user"
+
 type Runtime struct {
 	appName      string
 	sessionSvc   session.Service
@@ -110,7 +112,7 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}
 
 	var out strings.Builder
-	for ev, runErr := range runnerInstance.Run(modelCtx, req.UserID, req.SessionID, msg, agent.RunConfig{}) {
+	for ev, runErr := range runnerInstance.Run(modelCtx, appUserID, req.SessionID, msg, agent.RunConfig{}) {
 		if runErr != nil {
 			return RunResult{}, runErr
 		}
@@ -136,16 +138,34 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}, nil
 }
 
+func (r *Runtime) HasSession(ctx context.Context, sessionID string) bool {
+	if strings.TrimSpace(sessionID) == "" {
+		return false
+	}
+	_, err := r.sessionSvc.Get(ctx, &session.GetRequest{
+		AppName:   r.appName,
+		UserID:    appUserID,
+		SessionID: sessionID,
+	})
+	return err == nil
+}
+
 func filterMCPServers(all []postgres.MCPServer, allowed []string) []postgres.MCPServer {
+	enabledOnly := make([]postgres.MCPServer, 0, len(all))
+	for _, srv := range all {
+		if srv.Enabled {
+			enabledOnly = append(enabledOnly, srv)
+		}
+	}
 	if len(allowed) == 0 {
-		return all
+		return enabledOnly
 	}
 	set := make(map[string]struct{}, len(allowed))
 	for _, name := range allowed {
 		set[name] = struct{}{}
 	}
 	filtered := make([]postgres.MCPServer, 0, len(allowed))
-	for _, srv := range all {
+	for _, srv := range enabledOnly {
 		if _, ok := set[srv.Name]; ok {
 			filtered = append(filtered, srv)
 		}

@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     issuer_url TEXT NOT NULL,
     client_id TEXT NOT NULL,
     client_secret_enc TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT true,
     scopes_csv TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -100,3 +101,17 @@ CREATE TABLE IF NOT EXISTS memory_entries (
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_entries_scope ON memory_entries(slack_team_id, slack_channel_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS chat_threads (
+    id TEXT PRIMARY KEY,
+    slack_team_id TEXT NOT NULL,
+    slack_channel_id TEXT NOT NULL,
+    slack_thread_ts TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (slack_team_id, slack_channel_id, slack_thread_ts)
+);
+
+ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT true;

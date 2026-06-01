@@ -232,7 +232,7 @@ func (r *Repository) ListPromptVersions(ctx context.Context, docName string) ([]
 
 func (r *Repository) ListMCPServers(ctx context.Context) ([]MCPServer, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT name, resource_url, issuer_url, client_id, client_secret_enc, scopes_csv, created_at, updated_at
+		SELECT name, resource_url, issuer_url, client_id, client_secret_enc, enabled, scopes_csv, created_at, updated_at
 		FROM mcp_servers
 		ORDER BY name ASC
 	`)
@@ -244,12 +244,106 @@ func (r *Repository) ListMCPServers(ctx context.Context) ([]MCPServer, error) {
 	out := []MCPServer{}
 	for rows.Next() {
 		var s MCPServer
-		if err := rows.Scan(&s.Name, &s.ResourceURL, &s.IssuerURL, &s.ClientID, &s.ClientSecretEnc, &s.ScopesCSV, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.Name, &s.ResourceURL, &s.IssuerURL, &s.ClientID, &s.ClientSecretEnc, &s.Enabled, &s.ScopesCSV, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+func (r *Repository) UpsertMCPServer(ctx context.Context, server MCPServer) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO mcp_servers (name, resource_url, issuer_url, client_id, client_secret_enc, enabled, scopes_csv)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (name)
+		DO UPDATE SET
+			resource_url = EXCLUDED.resource_url,
+			issuer_url = EXCLUDED.issuer_url,
+			client_id = EXCLUDED.client_id,
+			client_secret_enc = EXCLUDED.client_secret_enc,
+			enabled = EXCLUDED.enabled,
+			scopes_csv = EXCLUDED.scopes_csv,
+			updated_at = now()
+	`, server.Name, server.ResourceURL, server.IssuerURL, server.ClientID, server.ClientSecretEnc, server.Enabled, server.ScopesCSV)
+	return err
+}
+
+func (r *Repository) SetEnabledMCPServers(ctx context.Context, names []string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `UPDATE mcp_servers SET enabled = false, updated_at = now()`); err != nil {
+		return err
+	}
+	if len(names) > 0 {
+		if _, err := tx.Exec(ctx, `UPDATE mcp_servers SET enabled = true, updated_at = now() WHERE name = ANY($1)`, names); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *Repository) DeleteMCPServer(ctx context.Context, name string) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM mcp_servers WHERE name = $1`, name)
+	return err
+}
+
+func (r *Repository) UserHasEnabledMCPAccess(ctx context.Context, teamID string, userID string) (bool, error) {
+	row := r.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM mcp_oauth_tokens tok
+			JOIN mcp_servers srv ON srv.name = tok.mcp_server
+			WHERE tok.slack_team_id = $1
+			  AND tok.slack_user_id = $2
+			  AND tok.expires_at > now()
+			  AND srv.enabled = true
+		)
+	`, teamID, userID)
+	var exists bool
+	if err := row.Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+func (r *Repository) UpsertChatThread(ctx context.Context, thread ChatThread) error {
+	if thread.ID == "" {
+		thread.ID = uuid.NewString()
+	}
+	if thread.CreatedBy == "" {
+		thread.CreatedBy = "system"
+	}
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO chat_threads (id, slack_team_id, slack_channel_id, slack_thread_ts, session_id, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (slack_team_id, slack_channel_id, slack_thread_ts)
+		DO UPDATE SET session_id = EXCLUDED.session_id, updated_at = now()
+	`, thread.ID, thread.SlackTeamID, thread.SlackChannelID, thread.SlackThreadTS, thread.SessionID, thread.CreatedBy)
+	return err
+}
+
+func (r *Repository) GetChatThread(ctx context.Context, teamID string, channelID string, threadTS string) (*ChatThread, error) {
+	row := r.db.QueryRow(ctx, `
+		SELECT id, slack_team_id, slack_channel_id, slack_thread_ts, session_id, created_by, created_at, updated_at
+		FROM chat_threads
+		WHERE slack_team_id = $1 AND slack_channel_id = $2 AND slack_thread_ts = $3
+	`, teamID, channelID, threadTS)
+
+	var out ChatThread
+	if err := row.Scan(
+		&out.ID, &out.SlackTeamID, &out.SlackChannelID, &out.SlackThreadTS, &out.SessionID, &out.CreatedBy, &out.CreatedAt, &out.UpdatedAt,
+	); err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &out, nil
 }
 
 func MustJSON(v any) []byte {

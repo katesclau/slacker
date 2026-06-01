@@ -29,12 +29,12 @@
 ### Request flow
 
 1. User triggers `/slacker` in Slack.
-2. Runtime parses optional agent target (`@agent_name <prompt>`).
-3. ADK runner executes the selected agent.
+2. Runtime parses optional agent target (`@agent_name <prompt>`), starts a new thread, and echoes the original request as a quoted message.
+3. ADK runner executes the selected agent while posting a "Thinking..." placeholder in the thread.
 4. Agent can call:
    - local Block Kit tools (`internal/tooling/blockkit`)
    - MCP tools from configured MCP servers.
-5. Response is posted back to Slack.
+5. The thinking placeholder is updated with a Block Kit response.
 
 ## Configuration
 
@@ -69,9 +69,10 @@ Required groups:
 2. Start local dependencies:
    - `docker compose up -d`
 3. Apply DB schema:
-   - `psql "postgres://postgres:postgres@localhost:5432/slacker?sslmode=disable" -f db/migrations/001_init.sql`
+   - `make db-migrate`
 4. Run service:
-   - `go run ./cmd/slacker`
+   - `make run`
+   - or with hot reload: `make air` (requires `make air-install` once)
 5. Verify health:
    - `curl http://localhost:8080/health`
 
@@ -95,6 +96,14 @@ Required groups:
 
 - Set `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN` in `.env`.
 - Start service and run `/slacker hello` in a channel.
+
+### `/slacker-config` admin command
+
+Admin users can manage MCP servers from Slack using:
+
+- `/slacker-config mcp add` to add/update an MCP server configuration.
+- `/slacker-config mcp list` to enable/disable configured MCP servers.
+- `/slacker-config mcp remove` to delete an MCP server configuration.
 
 ## User-defined agents
 
@@ -155,7 +164,7 @@ Optional:
 3. Provider redirects back with `code` + `state`.
 4. `slacker` exchanges code for token.
 5. Access/refresh tokens are encrypted and stored in `mcp_oauth_tokens`.
-6. Subsequent MCP tool calls by that Slack user/team include bearer auth.
+6. Subsequent MCP tool calls by that same Slack user/team include bearer auth.
 
 ## GitHub MCP example (from `mcp-slackitt` sample)
 

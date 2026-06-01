@@ -1,0 +1,39 @@
+# Go build outputs
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Databases/assets/secrets
+*.db
+.env
+.env.*
+!.env.example
+*.local.json
+*.ssm.json
+
+# IDE/editor config
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs/temp
+*.log
+tmp/
+.cache/
+dist/
+coverage/
+coverage-report/
+

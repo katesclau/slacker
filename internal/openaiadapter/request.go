@@ -13,6 +13,7 @@ import (
 func getRequestInput(req *model.LLMRequest) responses.ResponseNewParamsInputUnion {
 	var input responses.ResponseNewParamsInputUnion
 	if req == nil || req.Contents == nil {
+		input.OfString = param.NewOpt(" ")
 		return input
 	}
 	for _, content := range req.Contents {
@@ -24,7 +25,33 @@ func getRequestInput(req *model.LLMRequest) responses.ResponseNewParamsInputUnio
 			input.OfInputItemList = append(input.OfInputItemList, item)
 		}
 	}
+	if len(input.OfInputItemList) == 0 {
+		fallback := strings.TrimSpace(extractTextContents(req.Contents))
+		if fallback == "" {
+			fallback = " "
+		}
+		input.OfString = param.NewOpt(fallback)
+	}
 	return input
+}
+
+func extractTextContents(contents []*genai.Content) string {
+	var out strings.Builder
+	for _, content := range contents {
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if part == nil || strings.TrimSpace(part.Text) == "" {
+				continue
+			}
+			if out.Len() > 0 {
+				out.WriteString("\n")
+			}
+			out.WriteString(part.Text)
+		}
+	}
+	return out.String()
 }
 
 func getRequestContentItems(content *genai.Content) []responses.ResponseInputItemUnionParam {

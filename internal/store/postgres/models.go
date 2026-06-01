@@ -46,6 +46,7 @@ type MCPServer struct {
 	IssuerURL       string
 	ClientID        string
 	ClientSecretEnc string
+	Enabled         bool
 	ScopesCSV       string
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
@@ -68,4 +69,15 @@ type PromptVersion struct {
 	CreatedBy   string
 	CreatedAt   time.Time
 	Description string
+}
+
+type ChatThread struct {
+	ID             string
+	SlackTeamID    string
+	SlackChannelID string
+	SlackThreadTS  string
+	SessionID      string
+	CreatedBy      string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
