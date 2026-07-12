@@ -25,11 +25,17 @@ type TokenStore interface {
 	GetDelegatedOAuthToken(ctx context.Context, teamID string, userID string, mcpServer string) (*TokenRecord, error)
 }
 
+type RegistrationStore interface {
+	SaveMCPRegistration(ctx context.Context, mcpServer string, mode string, clientID string, clientSecret string) error
+}
+
 type RegistrationConfig struct {
 	ClientID                  string
 	ClientSecret              string
 	Scopes                    []string
 	AuthorizationServerIssuer string
+	Mode                      string
+	ClientName                string
 }
 
 type OAuthState struct {

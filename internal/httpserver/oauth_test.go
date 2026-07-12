@@ -63,8 +63,10 @@ func TestOAuthStartAndCallbackHandlers(t *testing.T) {
 	}
 
 	s := &Server{
-		log:        slog.Default(),
-		authByName: map[string]*mcpauth.Service{"demo": auth},
+		log: slog.Default(),
+		authService: func(context.Context, string) (*mcpauth.Service, error) {
+			return auth, nil
+		},
 	}
 
 	startReq := httptest.NewRequest(http.MethodGet, "/slacker/v1/oauth/demo/start?team_id=T1&user_id=U1&request_id=R1&resource_metadata="+resourceServer.URL, nil)

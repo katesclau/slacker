@@ -15,14 +15,16 @@ const (
 	mcpListModalCallbackID   = "slacker_config_mcp_list"
 	mcpRemoveModalCallbackID = "slacker_config_mcp_remove"
 
-	fieldName      = "mcp_name"
-	fieldResource  = "mcp_resource_url"
-	fieldIssuer    = "mcp_issuer_url"
-	fieldClientID  = "mcp_client_id"
-	fieldSecret    = "mcp_client_secret"
-	fieldScopesCSV = "mcp_scopes_csv"
-	fieldEnabled   = "mcp_enabled_servers"
-	fieldRemove    = "mcp_remove_server"
+	fieldName       = "mcp_name"
+	fieldResource   = "mcp_resource_url"
+	fieldIssuer     = "mcp_issuer_url"
+	fieldAuthMode   = "mcp_auth_mode"
+	fieldClientName = "mcp_client_name"
+	fieldClientID   = "mcp_client_id"
+	fieldSecret     = "mcp_client_secret"
+	fieldScopesCSV  = "mcp_scopes_csv"
+	fieldEnabled    = "mcp_enabled_servers"
+	fieldRemove     = "mcp_remove_server"
 )
 
 type configPrivateMetadata struct {
@@ -76,9 +78,11 @@ func (r *Runtime) openMCPAddModal(ctx context.Context, triggerID string, channel
 				inputBlock(fieldName, "MCP Server Name", "github"),
 				inputBlock(fieldResource, "Resource URL", "https://api.githubcopilot.com/mcp/"),
 				inputBlock(fieldIssuer, "OAuth Issuer URL", "https://github.com/login/oauth"),
-				inputBlock(fieldClientID, "Client ID", "github_oauth_client_id"),
-				inputBlock(fieldSecret, "Client Secret", "github_oauth_client_secret"),
-				inputBlock(fieldScopesCSV, "Scopes CSV", "repo,read:org,read:user,user:email"),
+				authModeSelectBlock(),
+				inputBlock(fieldClientName, "OAuth Client Name (DCR only)", "slacker"),
+				secretInputBlock(fieldClientID, "Client ID (required for static)", "client id"),
+				secretInputBlock(fieldSecret, "Client Secret (required for static)", "client secret"),
+				optionalInputBlock(fieldScopesCSV, "Scopes CSV", "repo,read:org,read:user,user:email"),
 			),
 		},
 	}
@@ -206,6 +210,8 @@ func (r *Runtime) handleMCPAddModalSubmission(ctx context.Context, cb slack.Inte
 	name := strings.TrimSpace(getViewInput(values, fieldName))
 	resourceURL := strings.TrimSpace(getViewInput(values, fieldResource))
 	issuerURL := strings.TrimSpace(getViewInput(values, fieldIssuer))
+	authMode := strings.ToLower(strings.TrimSpace(getViewSelect(values, fieldAuthMode)))
+	clientName := strings.TrimSpace(getViewInput(values, fieldClientName))
 	clientID := strings.TrimSpace(getViewInput(values, fieldClientID))
 	clientSecret := strings.TrimSpace(getViewInput(values, fieldSecret))
 	scopesCSV := strings.TrimSpace(getViewInput(values, fieldScopesCSV))
@@ -214,19 +220,35 @@ func (r *Runtime) handleMCPAddModalSubmission(ctx context.Context, cb slack.Inte
 		"name", name,
 		"resource_url", resourceURL,
 		"issuer_url", issuerURL,
-		"client_id", clientID,
+		"auth_mode", authMode,
+		"client_name", clientName,
+		"has_client_id", clientID != "",
 		"has_client_secret", clientSecret != "",
 		"scopes_csv", scopesCSV,
 	)
 
-	if name == "" || resourceURL == "" || issuerURL == "" || clientID == "" || clientSecret == "" {
-		return fmt.Errorf("name, resource URL, issuer URL, client ID, and client secret are required")
+	if authMode == "" {
+		authMode = "static"
+	}
+	if authMode != "static" && authMode != "dcr" {
+		return fmt.Errorf("auth mode must be static or dcr")
+	}
+	if name == "" || resourceURL == "" || issuerURL == "" {
+		return fmt.Errorf("name, resource URL, and issuer URL are required")
+	}
+	if authMode == "static" && (clientID == "" || clientSecret == "") {
+		return fmt.Errorf("client ID and client secret are required for static mode")
+	}
+	if authMode == "dcr" && clientName == "" {
+		clientName = "slacker"
 	}
 
 	err := r.repo.UpsertMCPServer(ctx, postgres.MCPServer{
 		Name:            name,
 		ResourceURL:     resourceURL,
 		IssuerURL:       issuerURL,
+		AuthMode:        authMode,
+		ClientName:      clientName,
 		ClientID:        clientID,
 		ClientSecretEnc: clientSecret,
 		Enabled:         true,
@@ -302,6 +324,51 @@ func inputBlock(actionID string, label string, placeholder string) *slack.InputB
 		nil,
 		slack.NewPlainTextInputBlockElement(slack.NewTextBlockObject(slack.PlainTextType, placeholder, false, false), actionID),
 	)
+}
+
+func optionalInputBlock(actionID string, label string, placeholder string) *slack.InputBlock {
+	return inputBlock(actionID, label, placeholder).WithOptional(true)
+}
+
+func authModeSelectBlock() *slack.InputBlock {
+	options := []*slack.OptionBlockObject{
+		slack.NewOptionBlockObject(
+			"static",
+			slack.NewTextBlockObject(slack.PlainTextType, "static", false, false),
+			nil,
+		),
+		slack.NewOptionBlockObject(
+			"dcr",
+			slack.NewTextBlockObject(slack.PlainTextType, "dcr", false, false),
+			nil,
+		),
+	}
+	el := slack.NewOptionsSelectBlockElement(
+		slack.OptTypeStatic,
+		slack.NewTextBlockObject(slack.PlainTextType, "Select auth mode", false, false),
+		fieldAuthMode,
+		options...,
+	)
+	el.InitialOption = options[0]
+	return slack.NewInputBlock(
+		fieldAuthMode,
+		slack.NewTextBlockObject(slack.PlainTextType, "Auth Mode", false, false),
+		nil,
+		el,
+	)
+}
+
+func secretInputBlock(actionID string, label string, placeholder string) *slack.InputBlock {
+	el := slack.NewPlainTextInputBlockElement(
+		slack.NewTextBlockObject(slack.PlainTextType, placeholder, false, false),
+		actionID,
+	)
+	return slack.NewInputBlock(
+		actionID,
+		slack.NewTextBlockObject(slack.PlainTextType, label, false, false),
+		slack.NewTextBlockObject(slack.PlainTextType, "Sensitive input; handled as secret and never logged.", false, false),
+		el,
+	).WithOptional(true)
 }
 
 func getViewInput(values map[string]map[string]slack.BlockAction, blockID string) string {

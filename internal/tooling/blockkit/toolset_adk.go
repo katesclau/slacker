@@ -3,9 +3,9 @@ package blockkit
 import (
 	"fmt"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 type ADKToolset struct {
@@ -29,7 +29,7 @@ func (t *ADKToolset) Tools(_ agent.ReadonlyContext) ([]tool.Tool, error) {
 	headerTool, err := functiontool.New(functiontool.Config{
 		Name:        "slack_block_header",
 		Description: "Render a Slack header block and return a placeholder string.",
-	}, func(_ tool.Context, args struct {
+	}, func(_ agent.Context, args struct {
 		Text string `json:"text"`
 	}) (map[string]any, error) {
 		return map[string]any{"placeholder": tools.Header(args.Text)}, nil
@@ -41,7 +41,7 @@ func (t *ADKToolset) Tools(_ agent.ReadonlyContext) ([]tool.Tool, error) {
 	dividerTool, err := functiontool.New(functiontool.Config{
 		Name:        "slack_block_divider",
 		Description: "Render a Slack divider block and return a placeholder string.",
-	}, func(_ tool.Context, _ map[string]any) (map[string]any, error) {
+	}, func(_ agent.Context, _ map[string]any) (map[string]any, error) {
 		return map[string]any{"placeholder": tools.Divider()}, nil
 	})
 	if err != nil {
@@ -51,7 +51,7 @@ func (t *ADKToolset) Tools(_ agent.ReadonlyContext) ([]tool.Tool, error) {
 	noticeTool, err := functiontool.New(functiontool.Config{
 		Name:        "slack_block_notice",
 		Description: "Render a Slack notice block and return a placeholder string.",
-	}, func(_ tool.Context, args struct {
+	}, func(_ agent.Context, args struct {
 		Level string `json:"level"`
 		Text  string `json:"text"`
 	}) (map[string]any, error) {
@@ -64,7 +64,7 @@ func (t *ADKToolset) Tools(_ agent.ReadonlyContext) ([]tool.Tool, error) {
 	kvTool, err := functiontool.New(functiontool.Config{
 		Name:        "slack_block_kv",
 		Description: "Render key/value Slack fields block and return placeholder string.",
-	}, func(_ tool.Context, args struct {
+	}, func(_ agent.Context, args struct {
 		Fields map[string]string `json:"fields"`
 	}) (map[string]any, error) {
 		return map[string]any{"placeholder": tools.KV(args.Fields)}, nil
@@ -76,7 +76,7 @@ func (t *ADKToolset) Tools(_ agent.ReadonlyContext) ([]tool.Tool, error) {
 	actionsTool, err := functiontool.New(functiontool.Config{
 		Name:        "slack_block_actions",
 		Description: "Render URL action buttons and return placeholder string.",
-	}, func(_ tool.Context, args struct {
+	}, func(_ agent.Context, args struct {
 		Buttons []ActionButton `json:"buttons"`
 	}) (map[string]any, error) {
 		return map[string]any{"placeholder": tools.Actions(args.Buttons)}, nil

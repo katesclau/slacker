@@ -7,8 +7,8 @@ import (
 
 	"github.com/katesclau/slacker/internal/store/postgres"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/mcptoolset"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/mcptoolset"
 )
 
 type Builder struct {

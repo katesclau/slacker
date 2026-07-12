@@ -44,6 +44,8 @@ type MCPServer struct {
 	Name            string
 	ResourceURL     string
 	IssuerURL       string
+	AuthMode        string
+	ClientName      string
 	ClientID        string
 	ClientSecretEnc string
 	Enabled         bool
