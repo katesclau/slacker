@@ -3,6 +3,7 @@ package agents
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 
 	"github.com/katesclau/slacker/internal/mcpclient"
@@ -71,8 +72,16 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if err != nil {
 		return RunResult{}, err
 	}
+	filteredServers := filterMCPServers(mcpServers, def.MCPServers)
+	slog.Debug("agent mcp server selection",
+		"agent_name", def.Name,
+		"configured_count", len(mcpServers),
+		"enabled_count", countEnabledMCPServers(mcpServers),
+		"allowed_mcp_servers", strings.Join(def.MCPServers, ","),
+		"selected_mcp_servers", strings.Join(mcpServerNames(filteredServers), ","),
+	)
 	mcpToolsets, err := mcpclient.Builder{
-		Servers:  filterMCPServers(mcpServers, def.MCPServers),
+		Servers:  filteredServers,
 		Resolver: r.resolver,
 	}.Build()
 	if err != nil {
@@ -80,6 +89,7 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}
 	agentToolsets := []tool.Toolset{r.blockToolset}
 	agentToolsets = append(agentToolsets, mcpToolsets...)
+	slog.Debug("agent toolsets prepared", "agent_name", def.Name, "local_toolsets", 1, "mcp_toolsets", len(mcpToolsets), "total_toolsets", len(agentToolsets))
 
 	instruction := def.Instruction
 	if strings.TrimSpace(instruction) == "" {
@@ -108,6 +118,7 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}
 
 	modelCtx := openaiadapter.WithModel(mcpclient.WithSlackIdentity(ctx, req.TeamID, req.UserID), def.Model)
+	slog.Debug("agent run started", "agent_name", def.Name, "team_id", req.TeamID, "user_id", req.UserID, "session_id", req.SessionID, "model_override", def.Model)
 	msg := &genai.Content{
 		Role:  genai.RoleUser,
 		Parts: []*genai.Part{{Text: req.Text}},
@@ -116,6 +127,7 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	var out strings.Builder
 	for ev, runErr := range runnerInstance.Run(modelCtx, appUserID, req.SessionID, msg, agent.RunConfig{}) {
 		if runErr != nil {
+			slog.Debug("agent run failed", "agent_name", def.Name, "team_id", req.TeamID, "user_id", req.UserID, "session_id", req.SessionID, "error", runErr)
 			return RunResult{}, runErr
 		}
 		if ev == nil || ev.Author == "user" || ev.Content == nil {
@@ -134,10 +146,29 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if out.Len() == 0 {
 		out.WriteString("No response generated.")
 	}
+	slog.Debug("agent run completed", "agent_name", def.Name, "team_id", req.TeamID, "user_id", req.UserID, "session_id", req.SessionID, "response_len", out.Len())
 	return RunResult{
 		AgentName: def.Name,
 		Text:      out.String(),
 	}, nil
+}
+
+func countEnabledMCPServers(servers []postgres.MCPServer) int {
+	count := 0
+	for _, server := range servers {
+		if server.Enabled {
+			count++
+		}
+	}
+	return count
+}
+
+func mcpServerNames(servers []postgres.MCPServer) []string {
+	names := make([]string, 0, len(servers))
+	for _, server := range servers {
+		names = append(names, server.Name)
+	}
+	return names
 }
 
 func (r *Runtime) HasSession(ctx context.Context, sessionID string) bool {

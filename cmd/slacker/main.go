@@ -37,6 +37,7 @@ func main() {
 		panic(err)
 	}
 	log := logger.New(cfg.App.LogLevel)
+	slog.SetDefault(log)
 
 	dbPool, err := postgres.NewPool(ctx, cfg.Postgres.DSN)
 	if err != nil {

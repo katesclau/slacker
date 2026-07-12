@@ -3,6 +3,7 @@ package mcpauth
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -13,17 +14,27 @@ type TokenResolver struct {
 }
 
 func (r TokenResolver) ResolveBearerToken(ctx context.Context, teamID string, userID string, server string) (string, error) {
+	slog.Debug("mcp oauth token lookup started", "mcp_server", server, "team_id", teamID, "user_id", userID)
 	rec, err := r.Store.GetDelegatedOAuthToken(ctx, teamID, userID, server)
 	if err != nil {
+		slog.Debug("mcp oauth token lookup failed", "mcp_server", server, "team_id", teamID, "user_id", userID, "error", err)
 		return "", err
 	}
 	if rec == nil {
+		slog.Debug("mcp oauth token missing", "mcp_server", server, "team_id", teamID, "user_id", userID)
 		return "", fmt.Errorf("no delegated oauth token found for server %q", server)
 	}
 	if !rec.ExpiresAt.IsZero() && rec.ExpiresAt.Before(time.Now()) {
+		slog.Debug("mcp oauth token expired", "mcp_server", server, "team_id", teamID, "user_id", userID, "expires_at", rec.ExpiresAt)
 		return "", fmt.Errorf("delegated oauth token expired for server %q", server)
 	}
-	return r.Cipher.DecryptFromBase64(rec.EncAccess)
+	token, err := r.Cipher.DecryptFromBase64(rec.EncAccess)
+	if err != nil {
+		slog.Debug("mcp oauth token decrypt failed", "mcp_server", server, "team_id", teamID, "user_id", userID, "error", err)
+		return "", err
+	}
+	slog.Debug("mcp oauth token ready", "mcp_server", server, "team_id", teamID, "user_id", userID, "issuer", rec.Issuer, "resource", rec.Resource, "scope_csv", rec.Scope, "expires_at", rec.ExpiresAt, "has_refresh_token", rec.EncRefresh != "")
+	return token, nil
 }
 
 type BearerTransport struct {
