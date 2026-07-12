@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS mcp_oauth_resume_requests (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-ALTER TABLE mcp_oauth_resume_requests
-    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
-
 DROP INDEX IF EXISTS idx_mcp_oauth_resume_requests_lookup;
+
+CREATE INDEX IF NOT EXISTS idx_mcp_oauth_resume_requests_created_at
+    ON mcp_oauth_resume_requests (created_at DESC);

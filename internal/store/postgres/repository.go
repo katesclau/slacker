@@ -409,6 +409,14 @@ func (r *Repository) DeleteMCPOAuthResumeRequest(ctx context.Context, requestID 
 	return err
 }
 
+func (r *Repository) DeleteStaleMCPOAuthResumeRequests(ctx context.Context, olderThan time.Time) (int64, error) {
+	tag, err := r.db.Exec(ctx, `DELETE FROM mcp_oauth_resume_requests WHERE created_at < $1`, olderThan)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 func MustJSON(v any) []byte {
 	raw, err := json.Marshal(v)
 	if err != nil {

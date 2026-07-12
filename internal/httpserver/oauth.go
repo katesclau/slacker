@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/katesclau/slacker/internal/mcpauth"
@@ -85,7 +86,9 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	s.log.Debug("oauth callback exchange succeeded", "mcp_server", server)
 	if s.oauthResume != nil && st != nil {
 		go func(state mcpauth.OAuthState) {
-			if err := s.oauthResume(context.Background(), state); err != nil {
+			resumeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := s.oauthResume(resumeCtx, state); err != nil {
 				s.log.Error("oauth resume failed",
 					"mcp_server", state.MCPServer,
 					"team_id", state.SlackTeamID,

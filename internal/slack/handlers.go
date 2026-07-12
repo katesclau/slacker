@@ -321,6 +321,12 @@ func isMCPAuthError(err error) bool {
 }
 
 func (r *Runtime) postMCPAuthPromptEphemeral(ctx context.Context, teamID, channelID, userID, threadTS, agentName, prompt string) error {
+	if deleted, err := r.repo.DeleteStaleMCPOAuthResumeRequests(ctx, time.Now().Add(-48*time.Hour)); err != nil {
+		r.log.Debug("failed to clean stale oauth resume requests", "error", err)
+	} else if deleted > 0 {
+		r.log.Debug("cleaned stale oauth resume requests", "deleted", deleted)
+	}
+
 	servers, err := r.repo.ListMCPServers(ctx)
 	if err != nil {
 		return err
