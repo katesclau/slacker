@@ -16,6 +16,11 @@ import (
 	"time"
 )
 
+const (
+	RegistrationModeStatic = "static"
+	RegistrationModeDCR    = "dcr"
+)
+
 type Service struct {
 	MCPServer     string
 	ResourceURL   string
@@ -84,11 +89,11 @@ func (s *Service) AuthorizeURL(ctx context.Context, teamID string, slackUserID s
 		return "", err
 	}
 	slog.Debug("mcpauth authorize auth server resolved", "mcp_server", s.MCPServer, "issuer", as.Issuer, "authorization_endpoint", as.AuthorizationEndpoint, "token_endpoint", as.TokenEndpoint)
-	clientID := strings.TrimSpace(s.Registration.ClientID)
-	if clientID == "" {
-		return "", fmt.Errorf("registration client id is required")
+	clientID, clientSecret, err := s.resolveClientCredentials(ctx, as, md)
+	if err != nil {
+		slog.Debug("mcpauth authorize client credentials resolution failed", "mcp_server", s.MCPServer, "error", err)
+		return "", err
 	}
-	clientSecret := strings.TrimSpace(s.Registration.ClientSecret)
 	codeVerifier, codeChallenge, err := generatePKCEVerifierAndChallenge()
 	if err != nil {
 		return "", err
@@ -297,6 +302,108 @@ func (s *Service) exchangeToken(ctx context.Context, endpoint string, pending pe
 		Scope:        tr.Scope,
 		ExpiresAt:    expiresAt,
 	}, nil
+}
+
+func (s *Service) resolveClientCredentials(ctx context.Context, as *AuthorizationServerMetadata, md *ProtectedResourceMetadata) (string, string, error) {
+	mode := strings.ToLower(strings.TrimSpace(s.Registration.Mode))
+	if mode == "" {
+		mode = RegistrationModeStatic
+	}
+	switch mode {
+	case RegistrationModeStatic:
+		clientID := strings.TrimSpace(s.Registration.ClientID)
+		if clientID == "" {
+			return "", "", fmt.Errorf("registration client id is required")
+		}
+		return clientID, strings.TrimSpace(s.Registration.ClientSecret), nil
+	case RegistrationModeDCR:
+		clientID := strings.TrimSpace(s.Registration.ClientID)
+		clientSecret := strings.TrimSpace(s.Registration.ClientSecret)
+		if clientID != "" {
+			slog.Debug("mcpauth dcr using existing registered client", "mcp_server", s.MCPServer, "client_id", clientID, "has_client_secret", clientSecret != "")
+			return clientID, clientSecret, nil
+		}
+		if as == nil || strings.TrimSpace(as.RegistrationEndpoint) == "" {
+			return "", "", fmt.Errorf("registration endpoint is required for dcr mode")
+		}
+		scope := scopeString("", firstNonEmptySlice(s.Registration.Scopes, md.ScopesSupported))
+		regRes, err := s.registerClientDCR(ctx, as.RegistrationEndpoint, scope)
+		if err != nil {
+			return "", "", err
+		}
+		s.mu.Lock()
+		s.Registration.ClientID = regRes.ClientID
+		s.Registration.ClientSecret = regRes.ClientSecret
+		s.mu.Unlock()
+		if regStore, ok := s.Store.(RegistrationStore); ok {
+			if err := regStore.SaveMCPRegistration(ctx, s.MCPServer, RegistrationModeDCR, regRes.ClientID, regRes.ClientSecret); err != nil {
+				slog.Debug("mcpauth dcr registration persistence failed", "mcp_server", s.MCPServer, "error", err)
+			} else {
+				slog.Debug("mcpauth dcr registration persisted", "mcp_server", s.MCPServer, "client_id", regRes.ClientID)
+			}
+		}
+		return regRes.ClientID, regRes.ClientSecret, nil
+	default:
+		return "", "", fmt.Errorf("unsupported registration mode %q", mode)
+	}
+}
+
+type dcrRequest struct {
+	ClientName              string   `json:"client_name"`
+	RedirectURIs            []string `json:"redirect_uris"`
+	GrantTypes              []string `json:"grant_types,omitempty"`
+	ResponseTypes           []string `json:"response_types,omitempty"`
+	Scope                   string   `json:"scope,omitempty"`
+	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method,omitempty"`
+}
+
+type dcrResponse struct {
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+}
+
+func (s *Service) registerClientDCR(ctx context.Context, registrationEndpoint string, scope string) (*dcrResponse, error) {
+	payload := dcrRequest{
+		ClientName:              firstNonEmpty(s.Registration.ClientName, s.MCPServer),
+		RedirectURIs:            []string{s.redirectURI()},
+		GrantTypes:              []string{"authorization_code"},
+		ResponseTypes:           []string{"code"},
+		Scope:                   scope,
+		TokenEndpointAuthMethod: "client_secret_post",
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	slog.Debug("mcpauth dcr registration start", "mcp_server", s.MCPServer, "registration_endpoint", registrationEndpoint, "client_name", payload.ClientName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, registrationEndpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.httpClient().Do(req)
+	if err != nil {
+		slog.Debug("mcpauth dcr registration request failed", "mcp_server", s.MCPServer, "error", err)
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	resBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		slog.Debug("mcpauth dcr registration failed", "mcp_server", s.MCPServer, "status", resp.StatusCode, "body", string(resBody))
+		return nil, fmt.Errorf("dynamic client registration failed with status %d", resp.StatusCode)
+	}
+	var out dcrResponse
+	if err := json.Unmarshal(resBody, &out); err != nil {
+		return nil, fmt.Errorf("decode dynamic client registration response: %w", err)
+	}
+	if strings.TrimSpace(out.ClientID) == "" {
+		return nil, fmt.Errorf("dynamic client registration response missing client_id")
+	}
+	slog.Debug("mcpauth dcr registration succeeded", "mcp_server", s.MCPServer, "client_id", out.ClientID, "has_client_secret", strings.TrimSpace(out.ClientSecret) != "")
+	return &out, nil
 }
 
 func (s *Service) putPending(p pendingAuth) {

@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     name TEXT PRIMARY KEY,
     resource_url TEXT NOT NULL,
     issuer_url TEXT NOT NULL,
+    auth_mode TEXT NOT NULL DEFAULT 'static',
+    client_name TEXT NOT NULL DEFAULT '',
     client_id TEXT NOT NULL,
     client_secret_enc TEXT NOT NULL,
     enabled BOOLEAN NOT NULL DEFAULT true,
@@ -115,3 +117,5 @@ CREATE TABLE IF NOT EXISTS chat_threads (
 );
 
 ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS auth_mode TEXT NOT NULL DEFAULT 'static';
+ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS client_name TEXT NOT NULL DEFAULT '';

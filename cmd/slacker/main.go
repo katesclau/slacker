@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -79,12 +80,6 @@ func main() {
 		log.Error("token cipher init failed", "error", err)
 		os.Exit(1)
 	}
-	authServices := buildMCPAuthServices(ctx, cfg, repo, cipher, log)
-	mcpServers, err := repo.ListMCPServers(ctx)
-	if err != nil {
-		log.Error("failed to load mcp servers", "error", err)
-		os.Exit(1)
-	}
 	modelAdapter, err := openaiadapter.New(cfg.OpenAI.APIKey, cfg.OpenAI.DefaultModel)
 	if err != nil {
 		log.Error("failed to initialize adk model adapter", "error", err)
@@ -94,7 +89,7 @@ func main() {
 		Store:  repo,
 		Cipher: cipher,
 	}
-	agentRuntime, err := agents.NewRuntime("slacker", modelAdapter, repo, blockRegistry, mcpServers, tokenResolver)
+	agentRuntime, err := agents.NewRuntime("slacker", modelAdapter, repo, blockRegistry, tokenResolver)
 	if err != nil {
 		log.Error("failed to initialize adk runtime", "error", err)
 		os.Exit(1)
@@ -103,7 +98,7 @@ func main() {
 	httpSrv := httpserver.New(
 		netAddr(cfg.App.Port),
 		log,
-		authServices,
+		newMCPAuthServiceResolver(cfg, repo, cipher, log),
 	)
 
 	slackRuntime := slackruntime.New(slackruntime.Config{
@@ -135,14 +130,47 @@ func main() {
 	}
 }
 
-func buildMCPAuthServices(ctx context.Context, cfg config.Config, repo *postgres.Repository, cipher *mcpauth.TokenCipher, log *slog.Logger) map[string]*mcpauth.Service {
-	services := map[string]*mcpauth.Service{}
+func newMCPAuthServiceResolver(cfg config.Config, repo *postgres.Repository, cipher *mcpauth.TokenCipher, log *slog.Logger) func(ctx context.Context, name string) (*mcpauth.Service, error) {
+	var mu sync.RWMutex
+	cache := map[string]*mcpauth.Service{}
+	return func(ctx context.Context, name string) (*mcpauth.Service, error) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return nil, nil
+		}
+		mu.RLock()
+		cached := cache[name]
+		mu.RUnlock()
+		if cached != nil {
+			return cached, nil
+		}
+		svc, err := buildMCPAuthService(ctx, cfg, repo, cipher, log, name)
+		if err != nil {
+			return nil, err
+		}
+		if svc == nil {
+			return nil, nil
+		}
+		mu.Lock()
+		if existing := cache[name]; existing != nil {
+			mu.Unlock()
+			return existing, nil
+		}
+		cache[name] = svc
+		mu.Unlock()
+		return svc, nil
+	}
+}
+
+func buildMCPAuthService(ctx context.Context, cfg config.Config, repo *postgres.Repository, cipher *mcpauth.TokenCipher, log *slog.Logger, targetName string) (*mcpauth.Service, error) {
 	servers, err := repo.ListMCPServers(ctx)
 	if err != nil {
-		log.Warn("could not load mcp servers from db", "error", err)
-		return services
+		return nil, err
 	}
 	for _, srv := range servers {
+		if strings.TrimSpace(srv.Name) != strings.TrimSpace(targetName) {
+			continue
+		}
 		scopes := splitScopesCSV(srv.ScopesCSV)
 		clientSecret := srv.ClientSecretEnc
 		if maybePlainCiphertext(clientSecret) {
@@ -151,7 +179,7 @@ func buildMCPAuthServices(ctx context.Context, cfg config.Config, repo *postgres
 			}
 		}
 
-		services[srv.Name] = &mcpauth.Service{
+		return &mcpauth.Service{
 			MCPServer:     srv.Name,
 			ResourceURL:   srv.ResourceURL,
 			PublicBaseURL: cfg.App.PublicBaseURL,
@@ -163,10 +191,13 @@ func buildMCPAuthServices(ctx context.Context, cfg config.Config, repo *postgres
 				ClientSecret:              clientSecret,
 				Scopes:                    scopes,
 				AuthorizationServerIssuer: srv.IssuerURL,
+				Mode:                      strings.ToLower(strings.TrimSpace(srv.AuthMode)),
+				ClientName:                strings.TrimSpace(srv.ClientName),
 			},
-		}
+		}, nil
 	}
-	return services
+	log.Debug("mcp auth service not found", "mcp_server", targetName)
+	return nil, nil
 }
 
 func splitScopesCSV(raw string) []string {

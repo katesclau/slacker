@@ -77,6 +77,70 @@ func TestAuthorizeAndExchangeCallback(t *testing.T) {
 	}
 }
 
+func TestAuthorizeURLWithDCRRegistration(t *testing.T) {
+	var issuer *httptest.Server
+	issuer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/oauth-authorization-server":
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"issuer":                 issuer.URL,
+				"authorization_endpoint": issuer.URL + "/authorize",
+				"token_endpoint":         issuer.URL + "/token",
+				"registration_endpoint":  issuer.URL + "/register",
+			})
+		case "/register":
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"client_id":     "dcr-client-id",
+				"client_secret": "dcr-client-secret",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer issuer.Close()
+
+	resource := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resource":              "https://api.example.com",
+			"authorization_servers": []string{issuer.URL},
+			"scopes_supported":      []string{"read"},
+		})
+	}))
+	defer resource.Close()
+
+	tokenCipher, err := NewTokenCipher([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	store := &memoryTokenStore{}
+	svc := &Service{
+		MCPServer:     "atlassian",
+		ResourceURL:   "https://mcp.atlassian.com/v1/mcp/authv2",
+		PublicBaseURL: "https://localhost:8080",
+		StateHMACKey:  []byte("1234567890123456"),
+		Store:         store,
+		Cipher:        tokenCipher,
+		Registration: RegistrationConfig{
+			Mode:                      RegistrationModeDCR,
+			ClientName:                "slacker",
+			Scopes:                    []string{"read:jira-work"},
+			AuthorizationServerIssuer: issuer.URL,
+		},
+		HTTPClient: &http.Client{Timeout: time.Second * 2},
+	}
+
+	authURL, err := svc.AuthorizeURL(context.Background(), "T1", "U1", "req-1", "", resource.URL+"/.well-known/oauth-protected-resource")
+	if err != nil {
+		t.Fatalf("authorize url: %v", err)
+	}
+	if !strings.Contains(authURL, "client_id=dcr-client-id") {
+		t.Fatalf("authorize URL missing dynamic client_id: %s", authURL)
+	}
+	if svc.Registration.ClientID != "dcr-client-id" {
+		t.Fatalf("expected service registration client id to be set, got %q", svc.Registration.ClientID)
+	}
+}
+
 func tokenSrvURL(t *testing.T) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

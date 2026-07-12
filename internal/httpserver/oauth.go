@@ -1,16 +1,23 @@
 package httpserver
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/katesclau/slacker/internal/mcpauth"
 )
 
 func (s *Server) oauthStart(w http.ResponseWriter, r *http.Request) {
 	server := chi.URLParam(r, "mcp_server")
 	s.log.Debug("oauth start request received", "mcp_server", server, "path", r.URL.Path)
-	svc := s.authByName[server]
+	svc, err := s.lookupAuthService(r.Context(), server)
+	if err != nil {
+		s.log.Error("oauth start service lookup failed", "mcp_server", server, "error", err)
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	if svc == nil {
 		s.log.Debug("oauth start service missing", "mcp_server", server)
 		writeError(w, http.StatusNotFound, fmt.Errorf("oauth service not configured for %q", server))
@@ -42,7 +49,12 @@ func (s *Server) oauthStart(w http.ResponseWriter, r *http.Request) {
 func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	server := chi.URLParam(r, "mcp_server")
 	s.log.Debug("oauth callback request received", "mcp_server", server, "path", r.URL.Path)
-	svc := s.authByName[server]
+	svc, err := s.lookupAuthService(r.Context(), server)
+	if err != nil {
+		s.log.Error("oauth callback service lookup failed", "mcp_server", server, "error", err)
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	if svc == nil {
 		s.log.Debug("oauth callback service missing", "mcp_server", server)
 		writeError(w, http.StatusNotFound, fmt.Errorf("oauth service not configured for %q", server))
@@ -74,4 +86,11 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`<!doctype html><html><body><p>OAuth authorization succeeded. You can close this tab.</p></body></html>`))
+}
+
+func (s *Server) lookupAuthService(ctx context.Context, name string) (*mcpauth.Service, error) {
+	if s.authService == nil {
+		return nil, nil
+	}
+	return s.authService(ctx, name)
 }

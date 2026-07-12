@@ -14,23 +14,20 @@ import (
 )
 
 type Server struct {
-	srv        *http.Server
-	log        *slog.Logger
-	authByName map[string]*mcpauth.Service
+	srv         *http.Server
+	log         *slog.Logger
+	authService func(ctx context.Context, name string) (*mcpauth.Service, error)
 }
 
-func New(addr string, log *slog.Logger, authByName map[string]*mcpauth.Service) *Server {
-	if authByName == nil {
-		authByName = map[string]*mcpauth.Service{}
-	}
+func New(addr string, log *slog.Logger, authService func(ctx context.Context, name string) (*mcpauth.Service, error)) *Server {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 
 	s := &Server{
-		log:        log,
-		authByName: authByName,
+		log:         log,
+		authService: authService,
 	}
 	r.Get("/health", s.health)
 	r.Route("/slacker/v1/oauth/{mcp_server}", func(rt chi.Router) {

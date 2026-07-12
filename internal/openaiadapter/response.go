@@ -6,7 +6,7 @@ import (
 
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/sirupsen/logrus"
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 )
 

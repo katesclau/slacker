@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -20,89 +21,172 @@ type AuthorizationServerMetadata struct {
 	Issuer                string `json:"issuer"`
 	AuthorizationEndpoint string `json:"authorization_endpoint"`
 	TokenEndpoint         string `json:"token_endpoint"`
+	RegistrationEndpoint  string `json:"registration_endpoint"`
 }
 
 func (s *Service) discoverProtectedResourceMetadata(ctx context.Context, resourceMetadataURL string) (*ProtectedResourceMetadata, error) {
-	resource := strings.TrimSpace(resourceMetadataURL)
-	if resource == "" {
-		resource = strings.TrimSuffix(s.ResourceURL, "/") + "/.well-known/oauth-protected-resource"
-	}
-	slog.Debug("mcpauth discover protected resource metadata", "mcp_server", s.MCPServer, "url", resource)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, resource, nil)
+	candidates, err := s.protectedResourceCandidates(resourceMetadataURL)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.httpClient().Do(req)
-	if err != nil {
-		slog.Debug("mcpauth discover protected resource request failed", "mcp_server", s.MCPServer, "url", resource, "error", err)
-		return nil, err
+	var lastErr error
+	for _, resource := range candidates {
+		slog.Debug("mcpauth discover protected resource metadata", "mcp_server", s.MCPServer, "url", resource)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, resource, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp, err := s.httpClient().Do(req)
+		if err != nil {
+			slog.Debug("mcpauth discover protected resource request failed", "mcp_server", s.MCPServer, "url", resource, "error", err)
+			lastErr = err
+			continue
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			lastErr = readErr
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			slog.Debug("mcpauth discover protected resource non-success status", "mcp_server", s.MCPServer, "url", resource, "status", resp.StatusCode)
+			lastErr = fmt.Errorf("resource metadata lookup failed with status %d", resp.StatusCode)
+			continue
+		}
+		var out ProtectedResourceMetadata
+		if err := json.Unmarshal(body, &out); err != nil {
+			slog.Debug("mcpauth decode protected resource metadata failed", "mcp_server", s.MCPServer, "url", resource, "error", err)
+			lastErr = fmt.Errorf("decode resource metadata: %w", err)
+			continue
+		}
+		if len(out.AuthorizationServers) == 0 {
+			slog.Debug("mcpauth protected resource metadata missing authorization servers", "mcp_server", s.MCPServer, "url", resource)
+			lastErr = fmt.Errorf("resource metadata missing authorization_servers")
+			continue
+		}
+		slog.Debug("mcpauth protected resource metadata resolved", "mcp_server", s.MCPServer, "resource", out.Resource, "authorization_servers", strings.Join(out.AuthorizationServers, ","))
+		return &out, nil
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		slog.Debug("mcpauth discover protected resource non-success status", "mcp_server", s.MCPServer, "url", resource, "status", resp.StatusCode)
-		return nil, fmt.Errorf("resource metadata lookup failed with status %d", resp.StatusCode)
+	if lastErr == nil {
+		lastErr = fmt.Errorf("resource metadata lookup failed")
 	}
-	var out ProtectedResourceMetadata
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		slog.Debug("mcpauth decode protected resource metadata failed", "mcp_server", s.MCPServer, "url", resource, "error", err)
-		return nil, fmt.Errorf("decode resource metadata: %w", err)
-	}
-	if len(out.AuthorizationServers) == 0 {
-		slog.Debug("mcpauth protected resource metadata missing authorization servers", "mcp_server", s.MCPServer, "url", resource)
-		return nil, fmt.Errorf("resource metadata missing authorization_servers")
-	}
-	slog.Debug("mcpauth protected resource metadata resolved", "mcp_server", s.MCPServer, "resource", out.Resource, "authorization_servers", strings.Join(out.AuthorizationServers, ","))
-	return &out, nil
+	return nil, lastErr
 }
 
 func (s *Service) discoverAuthorizationServerMetadata(ctx context.Context, issuer string) (*AuthorizationServerMetadata, error) {
 	issuer = strings.TrimSpace(issuer)
-	wellKnown := strings.TrimSuffix(issuer, "/") + "/.well-known/oauth-authorization-server"
-	slog.Debug("mcpauth discover authorization server metadata", "mcp_server", s.MCPServer, "issuer", issuer, "url", wellKnown)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, wellKnown, nil)
+	candidates, err := authorizationServerMetadataCandidates(issuer)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.httpClient().Do(req)
-	if err != nil {
-		slog.Debug("mcpauth discover authorization server request failed", "mcp_server", s.MCPServer, "issuer", issuer, "error", err)
-		if fallback := fallbackAuthorizationServerMetadata(issuer); fallback != nil {
-			slog.Debug("mcpauth discover authorization server using fallback metadata", "mcp_server", s.MCPServer, "issuer", issuer, "authorization_endpoint", fallback.AuthorizationEndpoint, "token_endpoint", fallback.TokenEndpoint)
-			return fallback, nil
+	var best *AuthorizationServerMetadata
+	var lastErr error
+	for _, metadataURL := range candidates {
+		slog.Debug("mcpauth discover authorization server metadata", "mcp_server", s.MCPServer, "issuer", issuer, "url", metadataURL)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataURL, nil)
+		if err != nil {
+			lastErr = err
+			continue
 		}
+		resp, err := s.httpClient().Do(req)
+		if err != nil {
+			slog.Debug("mcpauth discover authorization server request failed", "mcp_server", s.MCPServer, "issuer", issuer, "url", metadataURL, "error", err)
+			lastErr = err
+			continue
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			lastErr = readErr
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			slog.Debug("mcpauth discover authorization server non-success status", "mcp_server", s.MCPServer, "issuer", issuer, "url", metadataURL, "status", resp.StatusCode)
+			lastErr = fmt.Errorf("authorization server metadata lookup failed with status %d", resp.StatusCode)
+			continue
+		}
+		var out AuthorizationServerMetadata
+		if err := json.Unmarshal(body, &out); err != nil {
+			slog.Debug("mcpauth decode authorization server metadata failed", "mcp_server", s.MCPServer, "issuer", issuer, "url", metadataURL, "error", err)
+			lastErr = fmt.Errorf("decode authorization server metadata: %w", err)
+			continue
+		}
+		if out.AuthorizationEndpoint == "" || out.TokenEndpoint == "" {
+			slog.Debug("mcpauth authorization server metadata missing endpoints", "mcp_server", s.MCPServer, "issuer", issuer, "url", metadataURL, "authorization_endpoint", out.AuthorizationEndpoint, "token_endpoint", out.TokenEndpoint)
+			lastErr = fmt.Errorf("authorization server metadata missing required endpoints")
+			continue
+		}
+		if out.Issuer == "" {
+			out.Issuer = issuer
+		}
+		if best == nil {
+			c := out
+			best = &c
+		}
+		// Prefer metadata that includes registration_endpoint for DCR support.
+		if strings.TrimSpace(out.RegistrationEndpoint) != "" {
+			slog.Debug("mcpauth authorization server metadata resolved", "mcp_server", s.MCPServer, "issuer", out.Issuer, "authorization_endpoint", out.AuthorizationEndpoint, "token_endpoint", out.TokenEndpoint, "registration_endpoint", out.RegistrationEndpoint)
+			return &out, nil
+		}
+	}
+	if best != nil {
+		slog.Debug("mcpauth authorization server metadata resolved best candidate", "mcp_server", s.MCPServer, "issuer", best.Issuer, "authorization_endpoint", best.AuthorizationEndpoint, "token_endpoint", best.TokenEndpoint, "registration_endpoint", best.RegistrationEndpoint)
+		return best, nil
+	}
+	if fallback := fallbackAuthorizationServerMetadata(issuer); fallback != nil {
+		slog.Debug("mcpauth discover authorization server using fallback metadata", "mcp_server", s.MCPServer, "issuer", issuer, "authorization_endpoint", fallback.AuthorizationEndpoint, "token_endpoint", fallback.TokenEndpoint)
+		return fallback, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("authorization server metadata lookup failed")
+	}
+	return nil, lastErr
+}
+
+func (s *Service) protectedResourceCandidates(resourceMetadataURL string) ([]string, error) {
+	if v := strings.TrimSpace(resourceMetadataURL); v != "" {
+		return []string{v}, nil
+	}
+	resourceURL := strings.TrimSpace(s.ResourceURL)
+	u, err := url.Parse(resourceURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse resource url: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return nil, fmt.Errorf("resource url must be absolute")
+	}
+	base := fmt.Sprintf("%s://%s", strings.ToLower(u.Scheme), strings.ToLower(u.Host))
+	path := strings.TrimSuffix(u.EscapedPath(), "/")
+	candidates := make([]string, 0, 2)
+	if path != "" {
+		candidates = append(candidates, base+"/.well-known/oauth-protected-resource"+path)
+	}
+	candidates = append(candidates, base+"/.well-known/oauth-protected-resource")
+	return candidates, nil
+}
+
+func authorizationServerMetadataCandidates(issuer string) ([]string, error) {
+	u, err := url.Parse(strings.TrimSpace(issuer))
+	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		slog.Debug("mcpauth discover authorization server non-success status", "mcp_server", s.MCPServer, "issuer", issuer, "status", resp.StatusCode)
-		if fallback := fallbackAuthorizationServerMetadata(issuer); fallback != nil {
-			slog.Debug("mcpauth discover authorization server using fallback metadata", "mcp_server", s.MCPServer, "issuer", issuer, "authorization_endpoint", fallback.AuthorizationEndpoint, "token_endpoint", fallback.TokenEndpoint)
-			return fallback, nil
-		}
-		return nil, fmt.Errorf("authorization server metadata lookup failed with status %d", resp.StatusCode)
+	if u.Scheme == "" || u.Host == "" {
+		return nil, fmt.Errorf("issuer must be absolute")
 	}
-	var out AuthorizationServerMetadata
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		slog.Debug("mcpauth decode authorization server metadata failed", "mcp_server", s.MCPServer, "issuer", issuer, "error", err)
-		if fallback := fallbackAuthorizationServerMetadata(issuer); fallback != nil {
-			slog.Debug("mcpauth discover authorization server using fallback metadata", "mcp_server", s.MCPServer, "issuer", issuer, "authorization_endpoint", fallback.AuthorizationEndpoint, "token_endpoint", fallback.TokenEndpoint)
-			return fallback, nil
-		}
-		return nil, fmt.Errorf("decode authorization server metadata: %w", err)
+	base := fmt.Sprintf("%s://%s", strings.ToLower(u.Scheme), strings.ToLower(u.Host))
+	path := strings.TrimSuffix(u.EscapedPath(), "/")
+	if path == "" {
+		return []string{
+			base + "/.well-known/oauth-authorization-server",
+			base + "/.well-known/openid-configuration",
+		}, nil
 	}
-	if out.AuthorizationEndpoint == "" || out.TokenEndpoint == "" {
-		slog.Debug("mcpauth authorization server metadata missing endpoints", "mcp_server", s.MCPServer, "issuer", issuer, "authorization_endpoint", out.AuthorizationEndpoint, "token_endpoint", out.TokenEndpoint)
-		if fallback := fallbackAuthorizationServerMetadata(issuer); fallback != nil {
-			slog.Debug("mcpauth discover authorization server using fallback metadata", "mcp_server", s.MCPServer, "issuer", issuer, "authorization_endpoint", fallback.AuthorizationEndpoint, "token_endpoint", fallback.TokenEndpoint)
-			return fallback, nil
-		}
-		return nil, fmt.Errorf("authorization server metadata missing required endpoints")
-	}
-	if out.Issuer == "" {
-		out.Issuer = issuer
-	}
-	slog.Debug("mcpauth authorization server metadata resolved", "mcp_server", s.MCPServer, "issuer", out.Issuer, "authorization_endpoint", out.AuthorizationEndpoint, "token_endpoint", out.TokenEndpoint)
-	return &out, nil
+	return []string{
+		base + "/.well-known/oauth-authorization-server" + path,
+		base + "/.well-known/openid-configuration" + path,
+		strings.TrimSuffix(issuer, "/") + "/.well-known/openid-configuration",
+	}, nil
 }
 
 func fallbackAuthorizationServerMetadata(issuer string) *AuthorizationServerMetadata {

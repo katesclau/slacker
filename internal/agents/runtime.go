@@ -9,11 +9,11 @@ import (
 	"github.com/katesclau/slacker/internal/openaiadapter"
 	"github.com/katesclau/slacker/internal/store/postgres"
 	"github.com/katesclau/slacker/internal/tooling/blockkit"
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 	"google.golang.org/genai"
 )
 
@@ -25,7 +25,6 @@ type Runtime struct {
 	model        *openaiadapter.ModelAdapter
 	repo         *postgres.Repository
 	blockToolset tool.Toolset
-	mcpServers   []postgres.MCPServer
 	resolver     mcpclient.TokenResolver
 }
 
@@ -48,7 +47,7 @@ type AgentConfig struct {
 	MCPServers  []string `json:"mcp_servers"`
 }
 
-func NewRuntime(appName string, model *openaiadapter.ModelAdapter, repo *postgres.Repository, blockRegistry *blockkit.Registry, mcpServers []postgres.MCPServer, tokenResolver mcpclient.TokenResolver) (*Runtime, error) {
+func NewRuntime(appName string, model *openaiadapter.ModelAdapter, repo *postgres.Repository, blockRegistry *blockkit.Registry, tokenResolver mcpclient.TokenResolver) (*Runtime, error) {
 	blockToolset, err := blockkit.NewADKToolset(blockRegistry)
 	if err != nil {
 		return nil, err
@@ -59,7 +58,6 @@ func NewRuntime(appName string, model *openaiadapter.ModelAdapter, repo *postgre
 		model:        model,
 		repo:         repo,
 		blockToolset: blockToolset,
-		mcpServers:   mcpServers,
 		resolver:     tokenResolver,
 	}, nil
 }
@@ -69,8 +67,12 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if err != nil {
 		return RunResult{}, err
 	}
+	mcpServers, err := r.repo.ListMCPServers(ctx)
+	if err != nil {
+		return RunResult{}, err
+	}
 	mcpToolsets, err := mcpclient.Builder{
-		Servers:  filterMCPServers(r.mcpServers, def.MCPServers),
+		Servers:  filterMCPServers(mcpServers, def.MCPServers),
 		Resolver: r.resolver,
 	}.Build()
 	if err != nil {

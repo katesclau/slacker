@@ -232,7 +232,7 @@ func (r *Repository) ListPromptVersions(ctx context.Context, docName string) ([]
 
 func (r *Repository) ListMCPServers(ctx context.Context) ([]MCPServer, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT name, resource_url, issuer_url, client_id, client_secret_enc, enabled, scopes_csv, created_at, updated_at
+		SELECT name, resource_url, issuer_url, auth_mode, client_name, client_id, client_secret_enc, enabled, scopes_csv, created_at, updated_at
 		FROM mcp_servers
 		ORDER BY name ASC
 	`)
@@ -244,7 +244,7 @@ func (r *Repository) ListMCPServers(ctx context.Context) ([]MCPServer, error) {
 	out := []MCPServer{}
 	for rows.Next() {
 		var s MCPServer
-		if err := rows.Scan(&s.Name, &s.ResourceURL, &s.IssuerURL, &s.ClientID, &s.ClientSecretEnc, &s.Enabled, &s.ScopesCSV, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.Name, &s.ResourceURL, &s.IssuerURL, &s.AuthMode, &s.ClientName, &s.ClientID, &s.ClientSecretEnc, &s.Enabled, &s.ScopesCSV, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -254,18 +254,32 @@ func (r *Repository) ListMCPServers(ctx context.Context) ([]MCPServer, error) {
 
 func (r *Repository) UpsertMCPServer(ctx context.Context, server MCPServer) error {
 	_, err := r.db.Exec(ctx, `
-		INSERT INTO mcp_servers (name, resource_url, issuer_url, client_id, client_secret_enc, enabled, scopes_csv)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO mcp_servers (name, resource_url, issuer_url, auth_mode, client_name, client_id, client_secret_enc, enabled, scopes_csv)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (name)
 		DO UPDATE SET
 			resource_url = EXCLUDED.resource_url,
 			issuer_url = EXCLUDED.issuer_url,
+			auth_mode = EXCLUDED.auth_mode,
+			client_name = EXCLUDED.client_name,
 			client_id = EXCLUDED.client_id,
 			client_secret_enc = EXCLUDED.client_secret_enc,
 			enabled = EXCLUDED.enabled,
 			scopes_csv = EXCLUDED.scopes_csv,
 			updated_at = now()
-	`, server.Name, server.ResourceURL, server.IssuerURL, server.ClientID, server.ClientSecretEnc, server.Enabled, server.ScopesCSV)
+	`, server.Name, server.ResourceURL, server.IssuerURL, server.AuthMode, server.ClientName, server.ClientID, server.ClientSecretEnc, server.Enabled, server.ScopesCSV)
+	return err
+}
+
+func (r *Repository) SaveMCPRegistration(ctx context.Context, mcpServer string, mode string, clientID string, clientSecret string) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE mcp_servers
+		SET auth_mode = $2,
+		    client_id = $3,
+		    client_secret_enc = $4,
+		    updated_at = now()
+		WHERE name = $1
+	`, mcpServer, mode, clientID, clientSecret)
 	return err
 }
 
