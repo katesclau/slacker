@@ -76,16 +76,30 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Debug("oauth callback exchanging code", "mcp_server", server, "code_len", len(code), "state_len", len(state))
 
-	if _, err := svc.ExchangeCallback(r.Context(), code, state); err != nil {
+	st, err := svc.ExchangeCallback(r.Context(), code, state)
+	if err != nil {
 		s.log.Error("oauth callback exchange failed", "mcp_server", server, "error", err)
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	s.log.Debug("oauth callback exchange succeeded", "mcp_server", server)
+	if s.oauthResume != nil && st != nil {
+		go func(state mcpauth.OAuthState) {
+			if err := s.oauthResume(context.Background(), state); err != nil {
+				s.log.Error("oauth resume failed",
+					"mcp_server", state.MCPServer,
+					"team_id", state.SlackTeamID,
+					"user_id", state.SlackUserID,
+					"request_id", state.RequestID,
+					"error", err,
+				)
+			}
+		}(*st)
+	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`<!doctype html><html><body><p>OAuth authorization succeeded. You can close this tab.</p></body></html>`))
+	_, _ = w.Write([]byte(`<!doctype html><html><body><p>OAuth authorization succeeded. Slacker will resume the original conversation if one is waiting.</p></body></html>`))
 }
 
 func (s *Server) lookupAuthService(ctx context.Context, name string) (*mcpauth.Service, error) {

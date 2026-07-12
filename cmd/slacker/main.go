@@ -96,12 +96,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	httpSrv := httpserver.New(
-		netAddr(cfg.App.Port),
-		log,
-		newMCPAuthServiceResolver(cfg, repo, cipher, log),
-	)
-
 	slackRuntime := slackruntime.New(slackruntime.Config{
 		AppToken:      cfg.Slack.AppToken,
 		BotToken:      cfg.Slack.BotToken,
@@ -110,6 +104,13 @@ func main() {
 		AdminUsers:    cfg.Slack.AdminUsers,
 		PublicBaseURL: cfg.App.PublicBaseURL,
 	}, log, repo, memorySvc, blockTools, agentRuntime)
+
+	httpSrv := httpserver.New(
+		netAddr(cfg.App.Port),
+		log,
+		newMCPAuthServiceResolver(cfg, repo, cipher, log),
+		slackRuntime.ResumeOAuthConversation,
+	)
 
 	errCh := make(chan error, 2)
 	go func() { errCh <- httpSrv.Run() }()

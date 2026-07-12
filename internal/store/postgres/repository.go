@@ -360,6 +360,62 @@ func (r *Repository) GetChatThread(ctx context.Context, teamID string, channelID
 	return &out, nil
 }
 
+func (r *Repository) UpsertMCPOAuthResumeRequest(ctx context.Context, req MCPOAuthResumeRequest) error {
+	if req.RequestID == "" {
+		req.RequestID = uuid.NewString()
+	}
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO mcp_oauth_resume_requests (
+			request_id, mcp_server, slack_team_id, slack_user_id, slack_channel_id,
+			slack_thread_ts, agent_name, prompt
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		ON CONFLICT (request_id)
+		DO UPDATE SET
+			mcp_server = EXCLUDED.mcp_server,
+			slack_team_id = EXCLUDED.slack_team_id,
+			slack_user_id = EXCLUDED.slack_user_id,
+			slack_channel_id = EXCLUDED.slack_channel_id,
+			slack_thread_ts = EXCLUDED.slack_thread_ts,
+			agent_name = EXCLUDED.agent_name,
+			prompt = EXCLUDED.prompt,
+			created_at = now()
+	`, req.RequestID, req.MCPServer, req.SlackTeamID, req.SlackUserID, req.SlackChannelID, req.SlackThreadTS, req.AgentName, req.Prompt)
+	return err
+}
+
+func (r *Repository) ConsumeMCPOAuthResumeRequest(ctx context.Context, mcpServer string, teamID string, userID string, requestID string) (*MCPOAuthResumeRequest, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	row := tx.QueryRow(ctx, `
+		DELETE FROM mcp_oauth_resume_requests
+		WHERE request_id = $1
+		  AND mcp_server = $2
+		  AND slack_team_id = $3
+		  AND slack_user_id = $4
+		RETURNING request_id, mcp_server, slack_team_id, slack_user_id, slack_channel_id,
+		          slack_thread_ts, agent_name, prompt, created_at
+	`, requestID, mcpServer, teamID, userID)
+
+	var out MCPOAuthResumeRequest
+	if err := row.Scan(
+		&out.RequestID, &out.MCPServer, &out.SlackTeamID, &out.SlackUserID, &out.SlackChannelID,
+		&out.SlackThreadTS, &out.AgentName, &out.Prompt, &out.CreatedAt,
+	); err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func MustJSON(v any) []byte {
 	raw, err := json.Marshal(v)
 	if err != nil {

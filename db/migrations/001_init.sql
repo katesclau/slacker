@@ -71,6 +71,21 @@ CREATE TABLE IF NOT EXISTS mcp_oauth_tokens (
     PRIMARY KEY (mcp_server, slack_team_id, slack_user_id)
 );
 
+CREATE TABLE IF NOT EXISTS mcp_oauth_resume_requests (
+    request_id TEXT PRIMARY KEY,
+    mcp_server TEXT NOT NULL REFERENCES mcp_servers(name) ON DELETE CASCADE,
+    slack_team_id TEXT NOT NULL,
+    slack_user_id TEXT NOT NULL,
+    slack_channel_id TEXT NOT NULL,
+    slack_thread_ts TEXT NOT NULL,
+    agent_name TEXT NOT NULL DEFAULT '',
+    prompt TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_mcp_oauth_resume_requests_lookup
+    ON mcp_oauth_resume_requests(mcp_server, slack_team_id, slack_user_id, request_id);
+
 CREATE TABLE IF NOT EXISTS prompt_documents (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
