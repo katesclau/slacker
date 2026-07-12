@@ -7,8 +7,11 @@ CREATE TABLE IF NOT EXISTS mcp_oauth_resume_requests (
     slack_thread_ts TEXT NOT NULL,
     agent_name TEXT NOT NULL DEFAULT '',
     prompt TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_mcp_oauth_resume_requests_lookup
-    ON mcp_oauth_resume_requests(mcp_server, slack_team_id, slack_user_id, request_id);
+ALTER TABLE mcp_oauth_resume_requests
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+DROP INDEX IF EXISTS idx_mcp_oauth_resume_requests_lookup;

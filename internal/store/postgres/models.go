@@ -94,4 +94,5 @@ type MCPOAuthResumeRequest struct {
 	AgentName      string
 	Prompt         string
 	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }

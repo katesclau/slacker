@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/katesclau/slacker/internal/agents"
 	"github.com/katesclau/slacker/internal/mcpauth"
 	"github.com/katesclau/slacker/internal/memory"
@@ -112,7 +113,7 @@ func (r *Runtime) ResumeOAuthConversation(ctx context.Context, state mcpauth.OAu
 	if r == nil || r.repo == nil {
 		return nil
 	}
-	req, err := r.repo.ConsumeMCPOAuthResumeRequest(ctx, state.MCPServer, state.SlackTeamID, state.SlackUserID, state.RequestID)
+	req, err := r.repo.GetMCPOAuthResumeRequest(ctx, state.RequestID)
 	if err != nil {
 		return err
 	}
@@ -121,6 +122,18 @@ func (r *Runtime) ResumeOAuthConversation(ctx context.Context, state mcpauth.OAu
 			"mcp_server", state.MCPServer,
 			"team_id", state.SlackTeamID,
 			"user_id", state.SlackUserID,
+			"request_id", state.RequestID,
+		)
+		return nil
+	}
+	if req.MCPServer != state.MCPServer || req.SlackTeamID != state.SlackTeamID || req.SlackUserID != state.SlackUserID {
+		r.log.Debug("oauth resume request ownership mismatch",
+			"mcp_server", state.MCPServer,
+			"stored_mcp_server", req.MCPServer,
+			"team_id", state.SlackTeamID,
+			"stored_team_id", req.SlackTeamID,
+			"user_id", state.SlackUserID,
+			"stored_user_id", req.SlackUserID,
 			"request_id", state.RequestID,
 		)
 		return nil
@@ -146,7 +159,20 @@ func (r *Runtime) ResumeOAuthConversation(ctx context.Context, state mcpauth.OAu
 		return err
 	}
 	recent, _ := r.memory.Recent(ctx, req.SlackTeamID, req.SlackChannelID, 5)
-	return r.postAgentResponseToThread(ctx, req.SlackTeamID, req.SlackChannelID, req.SlackUserID, req.SlackThreadTS, req.Prompt, req.AgentName, recent)
+	if err := r.postAgentResponseToThread(ctx, req.SlackTeamID, req.SlackChannelID, req.SlackUserID, req.SlackThreadTS, req.Prompt, req.AgentName, recent); err != nil {
+		return err
+	}
+	if err := r.repo.DeleteMCPOAuthResumeRequest(ctx, req.RequestID); err != nil {
+		return err
+	}
+	r.log.Debug("oauth resume completed",
+		"mcp_server", req.MCPServer,
+		"team_id", req.SlackTeamID,
+		"user_id", req.SlackUserID,
+		"thread_ts", req.SlackThreadTS,
+		"request_id", req.RequestID,
+	)
+	return nil
 }
 
 func isAdmin(admins []string, userID string) bool {
@@ -318,7 +344,7 @@ func (r *Runtime) postMCPAuthPromptEphemeral(ctx context.Context, teamID, channe
 	var lines []string
 	buttons := make([]slack.BlockElement, 0, minInt(len(enabled), 5))
 	for i, server := range enabled {
-		requestID := fmt.Sprintf("oauth-%d-%s", time.Now().UnixNano(), server.Name)
+		requestID := uuid.NewString()
 		if err := r.repo.UpsertMCPOAuthResumeRequest(ctx, postgres.MCPOAuthResumeRequest{
 			RequestID:      requestID,
 			MCPServer:      server.Name,
