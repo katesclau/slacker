@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/katesclau/slacker/internal/mcpauth"
@@ -76,16 +77,32 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Debug("oauth callback exchanging code", "mcp_server", server, "code_len", len(code), "state_len", len(state))
 
-	if _, err := svc.ExchangeCallback(r.Context(), code, state); err != nil {
+	st, err := svc.ExchangeCallback(r.Context(), code, state)
+	if err != nil {
 		s.log.Error("oauth callback exchange failed", "mcp_server", server, "error", err)
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	s.log.Debug("oauth callback exchange succeeded", "mcp_server", server)
+	if s.oauthResume != nil && st != nil {
+		go func(state mcpauth.OAuthState) {
+			resumeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := s.oauthResume(resumeCtx, state); err != nil {
+				s.log.Error("oauth resume failed",
+					"mcp_server", state.MCPServer,
+					"team_id", state.SlackTeamID,
+					"user_id", state.SlackUserID,
+					"request_id", state.RequestID,
+					"error", err,
+				)
+			}
+		}(*st)
+	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`<!doctype html><html><body><p>OAuth authorization succeeded. You can close this tab.</p></body></html>`))
+	_, _ = w.Write([]byte(`<!doctype html><html><body><p>OAuth authorization succeeded. Slacker will resume the original conversation if one is waiting.</p></body></html>`))
 }
 
 func (s *Server) lookupAuthService(ctx context.Context, name string) (*mcpauth.Service, error) {

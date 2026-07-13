@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/katesclau/slacker/internal/agents"
+	"github.com/katesclau/slacker/internal/mcpauth"
 	"github.com/katesclau/slacker/internal/memory"
 	"github.com/katesclau/slacker/internal/store/postgres"
 	"github.com/slack-go/slack"
@@ -107,6 +109,72 @@ func (r *Runtime) respondConfig(ctx context.Context, cmd slack.SlashCommand) {
 	r.log.Debug("trace /slacker-config modal opened", "user_id", cmd.UserID, "action", action)
 }
 
+func (r *Runtime) ResumeOAuthConversation(ctx context.Context, state mcpauth.OAuthState) error {
+	if r == nil || r.repo == nil {
+		return nil
+	}
+	req, err := r.repo.GetMCPOAuthResumeRequest(ctx, state.RequestID)
+	if err != nil {
+		return err
+	}
+	if req == nil {
+		r.log.Debug("oauth resume request not found",
+			"mcp_server", state.MCPServer,
+			"team_id", state.SlackTeamID,
+			"user_id", state.SlackUserID,
+			"request_id", state.RequestID,
+		)
+		return nil
+	}
+	if req.MCPServer != state.MCPServer || req.SlackTeamID != state.SlackTeamID || req.SlackUserID != state.SlackUserID {
+		r.log.Debug("oauth resume request ownership mismatch",
+			"mcp_server", state.MCPServer,
+			"stored_mcp_server", req.MCPServer,
+			"team_id", state.SlackTeamID,
+			"stored_team_id", req.SlackTeamID,
+			"user_id", state.SlackUserID,
+			"stored_user_id", req.SlackUserID,
+			"request_id", state.RequestID,
+		)
+		return nil
+	}
+
+	if strings.TrimSpace(req.Prompt) == "" {
+		r.log.Debug("oauth resume request has empty prompt",
+			"mcp_server", req.MCPServer,
+			"team_id", req.SlackTeamID,
+			"user_id", req.SlackUserID,
+			"request_id", req.RequestID,
+		)
+		return nil
+	}
+
+	_, _, err = r.client.PostMessageContext(
+		ctx,
+		req.SlackChannelID,
+		slack.MsgOptionText(fmt.Sprintf("MCP access for `%s` is connected. Resuming the original request.", req.MCPServer), false),
+		slack.MsgOptionTS(req.SlackThreadTS),
+	)
+	if err != nil {
+		return err
+	}
+	recent, _ := r.memory.Recent(ctx, req.SlackTeamID, req.SlackChannelID, 5)
+	if err := r.postAgentResponseToThread(ctx, req.SlackTeamID, req.SlackChannelID, req.SlackUserID, req.SlackThreadTS, req.Prompt, req.AgentName, recent); err != nil {
+		return err
+	}
+	if err := r.repo.DeleteMCPOAuthResumeRequest(ctx, req.RequestID); err != nil {
+		return err
+	}
+	r.log.Debug("oauth resume completed",
+		"mcp_server", req.MCPServer,
+		"team_id", req.SlackTeamID,
+		"user_id", req.SlackUserID,
+		"thread_ts", req.SlackThreadTS,
+		"request_id", req.RequestID,
+	)
+	return nil
+}
+
 func isAdmin(admins []string, userID string) bool {
 	for _, admin := range admins {
 		if strings.TrimSpace(admin) == userID {
@@ -159,7 +227,7 @@ func (r *Runtime) postAgentResponseToThread(
 		if err != nil {
 			resultText = fmt.Sprintf("Agent execution failed: %v", err)
 			if isMCPAuthError(err) {
-				if promptErr := r.postMCPAuthPromptEphemeral(ctx, teamID, channelID, userID); promptErr != nil {
+				if promptErr := r.postMCPAuthPromptEphemeral(ctx, teamID, channelID, userID, threadTS, agentName, prompt); promptErr != nil {
 					r.log.Error("failed to send MCP auth prompt", "error", promptErr, "user_id", userID)
 				} else {
 					resultText = "MCP access is not connected for this user yet. I sent you a private message in this channel with connect links."
@@ -172,7 +240,7 @@ func (r *Runtime) postAgentResponseToThread(
 
 	if requestNeedsMCP && !hasMCPAccess {
 		if shouldTriggerMCPAccessFlow(resultText) || strings.Contains(strings.ToLower(resultText), "can't") || strings.Contains(strings.ToLower(resultText), "cannot") {
-			if promptErr := r.postMCPAuthPromptEphemeral(ctx, teamID, channelID, userID); promptErr != nil {
+			if promptErr := r.postMCPAuthPromptEphemeral(ctx, teamID, channelID, userID, threadTS, agentName, prompt); promptErr != nil {
 				r.log.Error("failed to send MCP auth prompt after response", "error", promptErr, "user_id", userID)
 			} else if !strings.Contains(strings.ToLower(resultText), "private message") {
 				resultText = strings.TrimSpace(resultText) + "\n\nI sent you a private message in this channel with MCP connect links."
@@ -252,7 +320,13 @@ func isMCPAuthError(err error) bool {
 		strings.Contains(msg, "oauth")
 }
 
-func (r *Runtime) postMCPAuthPromptEphemeral(ctx context.Context, teamID, channelID, userID string) error {
+func (r *Runtime) postMCPAuthPromptEphemeral(ctx context.Context, teamID, channelID, userID, threadTS, agentName, prompt string) error {
+	if deleted, err := r.repo.DeleteStaleMCPOAuthResumeRequests(ctx, time.Now().Add(-48*time.Hour)); err != nil {
+		r.log.Debug("failed to clean stale oauth resume requests", "error", err)
+	} else if deleted > 0 {
+		r.log.Debug("cleaned stale oauth resume requests", "deleted", deleted)
+	}
+
 	servers, err := r.repo.ListMCPServers(ctx)
 	if err != nil {
 		return err
@@ -276,7 +350,20 @@ func (r *Runtime) postMCPAuthPromptEphemeral(ctx context.Context, teamID, channe
 	var lines []string
 	buttons := make([]slack.BlockElement, 0, minInt(len(enabled), 5))
 	for i, server := range enabled {
-		link := oauthStartLink(r.cfg.PublicBaseURL, server.Name, teamID, userID)
+		requestID := uuid.NewString()
+		if err := r.repo.UpsertMCPOAuthResumeRequest(ctx, postgres.MCPOAuthResumeRequest{
+			RequestID:      requestID,
+			MCPServer:      server.Name,
+			SlackTeamID:    teamID,
+			SlackUserID:    userID,
+			SlackChannelID: channelID,
+			SlackThreadTS:  threadTS,
+			AgentName:      agentName,
+			Prompt:         prompt,
+		}); err != nil {
+			return err
+		}
+		link := oauthStartLink(r.cfg.PublicBaseURL, server.Name, teamID, userID, requestID)
 		lines = append(lines, fmt.Sprintf("• *%s*: %s", server.Name, link))
 		if i < 5 {
 			btn := slack.NewButtonBlockElement(
@@ -327,11 +414,11 @@ func (r *Runtime) postMCPAuthPromptEphemeral(ctx context.Context, teamID, channe
 	return err
 }
 
-func oauthStartLink(baseURL, serverName, teamID, userID string) string {
+func oauthStartLink(baseURL, serverName, teamID, userID, requestID string) string {
 	q := url.Values{}
 	q.Set("team_id", teamID)
 	q.Set("user_id", userID)
-	q.Set("request_id", fmt.Sprintf("oauth-%d", time.Now().UnixNano()))
+	q.Set("request_id", requestID)
 	return fmt.Sprintf("%s/slacker/v1/oauth/%s/start?%s", strings.TrimSuffix(baseURL, "/"), url.PathEscape(serverName), q.Encode())
 }
 

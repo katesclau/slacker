@@ -17,9 +17,15 @@ type Server struct {
 	srv         *http.Server
 	log         *slog.Logger
 	authService func(ctx context.Context, name string) (*mcpauth.Service, error)
+	oauthResume func(ctx context.Context, state mcpauth.OAuthState) error
 }
 
-func New(addr string, log *slog.Logger, authService func(ctx context.Context, name string) (*mcpauth.Service, error)) *Server {
+func New(
+	addr string,
+	log *slog.Logger,
+	authService func(ctx context.Context, name string) (*mcpauth.Service, error),
+	oauthResume func(ctx context.Context, state mcpauth.OAuthState) error,
+) *Server {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -28,6 +34,7 @@ func New(addr string, log *slog.Logger, authService func(ctx context.Context, na
 	s := &Server{
 		log:         log,
 		authService: authService,
+		oauthResume: oauthResume,
 	}
 	r.Get("/health", s.health)
 	r.Route("/slacker/v1/oauth/{mcp_server}", func(rt chi.Router) {

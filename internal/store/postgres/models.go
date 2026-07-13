@@ -83,3 +83,16 @@ type ChatThread struct {
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }
+
+type MCPOAuthResumeRequest struct {
+	RequestID      string
+	MCPServer      string
+	SlackTeamID    string
+	SlackUserID    string
+	SlackChannelID string
+	SlackThreadTS  string
+	AgentName      string
+	Prompt         string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
