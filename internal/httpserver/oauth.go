@@ -86,7 +86,7 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	s.log.Debug("oauth callback exchange succeeded", "mcp_server", server)
 	if s.oauthResume != nil && st != nil {
 		go func(state mcpauth.OAuthState) {
-			resumeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			resumeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
 			if err := s.oauthResume(resumeCtx, state); err != nil {
 				s.log.Error("oauth resume failed",
