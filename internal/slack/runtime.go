@@ -10,6 +10,7 @@ import (
 
 	"github.com/katesclau/slacker/internal/agents"
 	"github.com/katesclau/slacker/internal/memory"
+	"github.com/katesclau/slacker/internal/openaiadapter"
 	"github.com/katesclau/slacker/internal/store/postgres"
 	"github.com/katesclau/slacker/internal/tooling/blockkit"
 	"github.com/slack-go/slack"
@@ -35,12 +36,13 @@ type Runtime struct {
 	memory   *memory.Service
 	blockkit *blockkit.Tools
 	agents   *agents.Runtime
+	model    llmCompleter
 
 	processedMu       sync.Mutex
 	processedMessages map[string]time.Time
 }
 
-func New(cfg Config, log *slog.Logger, repo *postgres.Repository, memorySvc *memory.Service, blockTools *blockkit.Tools, agentRuntime *agents.Runtime) *Runtime {
+func New(cfg Config, log *slog.Logger, repo *postgres.Repository, memorySvc *memory.Service, blockTools *blockkit.Tools, agentRuntime *agents.Runtime, model *openaiadapter.ModelAdapter) *Runtime {
 	client := slack.New(cfg.BotToken, slack.OptionAppLevelToken(cfg.AppToken))
 	socket := socketmode.New(client)
 	return &Runtime{
@@ -52,6 +54,7 @@ func New(cfg Config, log *slog.Logger, repo *postgres.Repository, memorySvc *mem
 		memory:            memorySvc,
 		blockkit:          blockTools,
 		agents:            agentRuntime,
+		model:             model,
 		processedMessages: map[string]time.Time{},
 	}
 }

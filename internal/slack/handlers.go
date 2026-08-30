@@ -194,7 +194,15 @@ func (r *Runtime) postAgentResponseToThread(
 	agentName string,
 	recent []string,
 ) error {
-	requestNeedsMCP := shouldTriggerMCPAccessFlow(prompt)
+	thinkingText := ":hourglass_flowing_sand: Thinking..."
+	_, thinkingTS, thinkingErr := r.client.PostMessageContext(
+		ctx,
+		channelID,
+		slack.MsgOptionText(thinkingText, false),
+		slack.MsgOptionTS(threadTS),
+	)
+
+	requestNeedsMCP := r.shouldTriggerMCPAccessFlow(ctx, prompt)
 	hasMCPAccess := false
 	if requestNeedsMCP {
 		access, accessErr := r.repo.UserHasEnabledMCPAccess(ctx, teamID, userID)
@@ -204,14 +212,6 @@ func (r *Runtime) postAgentResponseToThread(
 			hasMCPAccess = access
 		}
 	}
-
-	thinkingText := ":hourglass_flowing_sand: Thinking..."
-	_, thinkingTS, thinkingErr := r.client.PostMessageContext(
-		ctx,
-		channelID,
-		slack.MsgOptionText(thinkingText, false),
-		slack.MsgOptionTS(threadTS),
-	)
 
 	sessionID := threadSessionID(teamID, channelID, threadTS)
 	resultText := "No response generated."
@@ -239,7 +239,7 @@ func (r *Runtime) postAgentResponseToThread(
 	}
 
 	if requestNeedsMCP && !hasMCPAccess {
-		if shouldTriggerMCPAccessFlow(resultText) || strings.Contains(strings.ToLower(resultText), "can't") || strings.Contains(strings.ToLower(resultText), "cannot") {
+		if r.shouldTriggerMCPAccessFlow(ctx, resultText) || strings.Contains(strings.ToLower(resultText), "can't") || strings.Contains(strings.ToLower(resultText), "cannot") {
 			if promptErr := r.postMCPAuthPromptEphemeral(ctx, teamID, channelID, userID, threadTS, agentName, prompt); promptErr != nil {
 				r.log.Error("failed to send MCP auth prompt after response", "error", promptErr, "user_id", userID)
 			} else if !strings.Contains(strings.ToLower(resultText), "private message") {
@@ -281,29 +281,6 @@ func (r *Runtime) postAgentResponseToThread(
 
 func threadSessionID(teamID, channelID, threadTS string) string {
 	return fmt.Sprintf("%s:%s:%s", teamID, channelID, threadTS)
-}
-
-func shouldTriggerMCPAccessFlow(text string) bool {
-	text = strings.ToLower(strings.TrimSpace(text))
-	if text == "" {
-		return false
-	}
-	keywords := []string{
-		"mcp",
-		"github",
-		"repo",
-		"repository",
-		"repositories",
-		"organization",
-		"pull request",
-		"issue",
-	}
-	for _, kw := range keywords {
-		if strings.Contains(text, kw) {
-			return true
-		}
-	}
-	return false
 }
 
 func isMCPAuthError(err error) bool {
