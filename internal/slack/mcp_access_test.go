@@ -122,8 +122,8 @@ func TestClassifyOAuthMCPAccessUsesModelAndConfiguredServers(t *testing.T) {
 	stub := &stubCompleter{reply: `{"needed":true,"servers":["jira"]}`}
 	r := &Runtime{model: stub}
 
-	if !r.classifyOAuthMCPAccess(context.Background(), "create a Jira ticket for this bug", servers) {
-		t.Fatal("expected classifier to match jira")
+	if got := r.classifyOAuthMCPAccess(context.Background(), "create a Jira ticket for this bug", servers); len(got) != 1 || got[0] != "jira" {
+		t.Fatalf("expected classifier to match jira, got %v", got)
 	}
 	if stub.lastModel != mcpAccessClassifierModel {
 		t.Fatalf("expected light model %q, got %q", mcpAccessClassifierModel, stub.lastModel)
@@ -140,8 +140,8 @@ func TestClassifyOAuthMCPAccessIgnoresHallucinatedServers(t *testing.T) {
 		{Name: "github", IssuerURL: "https://github.com/login/oauth", Enabled: true},
 	}
 	r := &Runtime{model: &stubCompleter{reply: `{"needed":true,"servers":["notion"]}`}}
-	if r.classifyOAuthMCPAccess(context.Background(), "open my Notion page", servers) {
-		t.Fatal("expected hallucinated server not to trigger oauth flow")
+	if got := r.classifyOAuthMCPAccess(context.Background(), "open my Notion page", servers); len(got) != 0 {
+		t.Fatalf("expected hallucinated server not to trigger oauth flow, got %v", got)
 	}
 }
 
@@ -152,11 +152,42 @@ func TestClassifyOAuthMCPAccessFallsBackWhenModelFails(t *testing.T) {
 		{Name: "linear", IssuerURL: "https://linear.app/oauth", Enabled: true},
 	}
 	r := &Runtime{model: &stubCompleter{err: errors.New("openai unavailable")}}
-	if !r.classifyOAuthMCPAccess(context.Background(), "list linear projects", servers) {
-		t.Fatal("expected name fallback after classifier failure")
+	if got := r.classifyOAuthMCPAccess(context.Background(), "list linear projects", servers); len(got) != 1 || got[0] != "linear" {
+		t.Fatalf("expected name fallback after classifier failure, got %v", got)
 	}
-	if r.classifyOAuthMCPAccess(context.Background(), "hello there", servers) {
-		t.Fatal("expected unrelated text not to match after classifier failure")
+	if got := r.classifyOAuthMCPAccess(context.Background(), "hello there", servers); len(got) != 0 {
+		t.Fatalf("expected unrelated text not to match after classifier failure, got %v", got)
+	}
+}
+
+func TestFilterUnauthenticatedOAuthServers(t *testing.T) {
+	t.Parallel()
+
+	servers := []postgres.MCPServer{
+		{Name: "github", IssuerURL: "https://github.com/login/oauth", Enabled: true},
+		{Name: "atlassian", IssuerURL: "https://auth.atlassian.com", Enabled: true},
+		{Name: "local", IssuerURL: "", Enabled: true},
+	}
+	connected := map[string]struct{}{"github": {}}
+
+	got := filterUnauthenticatedOAuthServers(servers, connected, nil)
+	if len(got) != 1 || got[0].Name != "atlassian" {
+		t.Fatalf("expected only unauthenticated oauth servers, got %#v", got)
+	}
+
+	got = filterUnauthenticatedOAuthServers(servers, connected, []string{"github"})
+	if len(got) != 0 {
+		t.Fatalf("expected no prompt when needed server is already connected, got %#v", got)
+	}
+
+	got = filterUnauthenticatedOAuthServers(servers, connected, []string{"atlassian"})
+	if len(got) != 1 || got[0].Name != "atlassian" {
+		t.Fatalf("expected only the needed unauthenticated server, got %#v", got)
+	}
+
+	got = filterUnauthenticatedOAuthServers(servers, map[string]struct{}{}, []string{"github"})
+	if len(got) != 1 || got[0].Name != "github" {
+		t.Fatalf("expected only github when that is the needed server, got %#v", got)
 	}
 }
 

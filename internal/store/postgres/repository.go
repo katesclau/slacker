@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -307,22 +308,41 @@ func (r *Repository) DeleteMCPServer(ctx context.Context, name string) error {
 }
 
 func (r *Repository) UserHasEnabledMCPAccess(ctx context.Context, teamID string, userID string) (bool, error) {
-	row := r.db.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1
-			FROM mcp_oauth_tokens tok
-			JOIN mcp_servers srv ON srv.name = tok.mcp_server
-			WHERE tok.slack_team_id = $1
-			  AND tok.slack_user_id = $2
-			  AND tok.expires_at > now()
-			  AND srv.enabled = true
-		)
-	`, teamID, userID)
-	var exists bool
-	if err := row.Scan(&exists); err != nil {
+	connected, err := r.ListConnectedMCPServers(ctx, teamID, userID)
+	if err != nil {
 		return false, err
 	}
-	return exists, nil
+	return len(connected) > 0, nil
+}
+
+func (r *Repository) ListConnectedMCPServers(ctx context.Context, teamID string, userID string) (map[string]struct{}, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT tok.mcp_server
+		FROM mcp_oauth_tokens tok
+		JOIN mcp_servers srv ON srv.name = tok.mcp_server
+		WHERE tok.slack_team_id = $1
+		  AND tok.slack_user_id = $2
+		  AND tok.expires_at > now()
+		  AND srv.enabled = true
+	`, teamID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		out[strings.ToLower(name)] = struct{}{}
+	}
+	return out, rows.Err()
 }
 
 func (r *Repository) UpsertChatThread(ctx context.Context, thread ChatThread) error {

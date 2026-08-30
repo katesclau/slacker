@@ -22,30 +22,34 @@ type llmCompleter interface {
 }
 
 func (r *Runtime) shouldTriggerMCPAccessFlow(ctx context.Context, text string) bool {
+	return len(r.neededOAuthMCPServers(ctx, text)) > 0
+}
+
+func (r *Runtime) neededOAuthMCPServers(ctx context.Context, text string) []string {
 	text = strings.TrimSpace(text)
 	if text == "" || r == nil || r.repo == nil {
-		return false
+		return nil
 	}
 	servers, err := r.repo.ListMCPServers(ctx)
 	if err != nil {
 		if r.log != nil {
 			r.log.Error("failed listing MCP servers for access classification", "error", err)
 		}
-		return false
+		return nil
 	}
 	oauthServers := oauthEnabledMCPServers(servers)
 	if len(oauthServers) == 0 {
-		return false
+		return nil
 	}
 	return r.classifyOAuthMCPAccess(ctx, text, oauthServers)
 }
 
-func (r *Runtime) classifyOAuthMCPAccess(ctx context.Context, text string, servers []postgres.MCPServer) bool {
+func (r *Runtime) classifyOAuthMCPAccess(ctx context.Context, text string, servers []postgres.MCPServer) []string {
 	if strings.TrimSpace(text) == "" || len(servers) == 0 {
-		return false
+		return nil
 	}
 	if r == nil || r.model == nil {
-		return textMentionsOAuthMCPServer(text, servers)
+		return mentionedOAuthMCPServers(text, servers)
 	}
 
 	classifyCtx, cancel := context.WithTimeout(ctx, mcpAccessClassifierTimeout)
@@ -56,7 +60,7 @@ func (r *Runtime) classifyOAuthMCPAccess(ctx context.Context, text string, serve
 		if r.log != nil {
 			r.log.Debug("mcp access classifier failed", "error", err)
 		}
-		return textMentionsOAuthMCPServer(text, servers)
+		return mentionedOAuthMCPServers(text, servers)
 	}
 
 	needed, matched := parseMCPAccessDecision(raw, servers)
@@ -67,7 +71,32 @@ func (r *Runtime) classifyOAuthMCPAccess(ctx context.Context, text string, serve
 			"raw", raw,
 		)
 	}
-	return len(matched) > 0
+	return matched
+}
+
+func filterUnauthenticatedOAuthServers(servers []postgres.MCPServer, connected map[string]struct{}, needed []string) []postgres.MCPServer {
+	oauth := oauthEnabledMCPServers(servers)
+	wanted := make(map[string]struct{}, len(needed))
+	for _, name := range needed {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name != "" {
+			wanted[name] = struct{}{}
+		}
+	}
+	out := make([]postgres.MCPServer, 0, len(oauth))
+	for _, server := range oauth {
+		key := strings.ToLower(strings.TrimSpace(server.Name))
+		if len(wanted) > 0 {
+			if _, ok := wanted[key]; !ok {
+				continue
+			}
+		}
+		if _, ok := connected[key]; ok {
+			continue
+		}
+		out = append(out, server)
+	}
+	return out
 }
 
 func oauthEnabledMCPServers(servers []postgres.MCPServer) []postgres.MCPServer {
@@ -156,20 +185,40 @@ func uniqueConfiguredServers(names []string, allowed map[string]string) []string
 }
 
 func textMentionsOAuthMCPServer(text string, servers []postgres.MCPServer) bool {
+	return len(mentionedOAuthMCPServers(text, servers)) > 0
+}
+
+func mentionedOAuthMCPServers(text string, servers []postgres.MCPServer) []string {
 	lower := strings.ToLower(text)
+	out := make([]string, 0, len(servers))
+	seen := make(map[string]struct{}, len(servers))
 	for _, server := range servers {
-		name := strings.ToLower(strings.TrimSpace(server.Name))
-		if name != "" && strings.Contains(lower, name) {
-			return true
+		name := strings.TrimSpace(server.Name)
+		key := strings.ToLower(name)
+		if key == "" {
+			continue
 		}
-		if host := resourceHost(server.ResourceURL); host != "" && strings.Contains(lower, host) {
-			return true
+		if _, exists := seen[key]; exists {
+			continue
 		}
-		if host := resourceHost(server.IssuerURL); host != "" && strings.Contains(lower, host) {
-			return true
+		matched := name != "" && strings.Contains(lower, key)
+		if !matched {
+			if host := resourceHost(server.ResourceURL); host != "" && strings.Contains(lower, host) {
+				matched = true
+			}
 		}
+		if !matched {
+			if host := resourceHost(server.IssuerURL); host != "" && strings.Contains(lower, host) {
+				matched = true
+			}
+		}
+		if !matched {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, name)
 	}
-	return false
+	return out
 }
 
 func resourceHost(rawURL string) string {
