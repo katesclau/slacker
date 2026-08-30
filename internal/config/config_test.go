@@ -14,6 +14,7 @@ func TestLoad_ConfigFromEnv(t *testing.T) {
 	t.Setenv("OAUTH_STATE_HMAC_KEY_BASE64", base64.StdEncoding.EncodeToString([]byte("1234567890123456")))
 	t.Setenv("APP_PORT", "9090")
 	t.Setenv("SLACK_ADMIN_USERS", "U1,U2")
+	t.Setenv("SLACK_BOT_USER_TAG", "@slacker-dev")
 
 	cfg, err := Load()
 	if err != nil {
@@ -25,5 +26,8 @@ func TestLoad_ConfigFromEnv(t *testing.T) {
 	}
 	if len(cfg.Slack.AdminUsers) != 2 {
 		t.Fatalf("expected 2 admins, got %d", len(cfg.Slack.AdminUsers))
+	}
+	if cfg.Slack.BotUserTag != "slacker-dev" {
+		t.Fatalf("expected bot user tag slacker-dev, got %q", cfg.Slack.BotUserTag)
 	}
 }

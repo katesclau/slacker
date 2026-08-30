@@ -15,56 +15,101 @@ import (
 	"github.com/slack-go/slack"
 )
 
+type chatStartRequest struct {
+	TeamID        string
+	ChannelID     string
+	ChannelName   string
+	UserID        string
+	UserName      string
+	Text          string
+	MessageTS     string
+	ThreadTS      string
+	FromMention   bool
+	PostStarter   bool
+	QuoteOriginal bool
+}
+
 func (r *Runtime) respondChat(ctx context.Context, cmd slack.SlashCommand) {
+	r.startChatConversation(ctx, chatStartRequest{
+		TeamID:        cmd.TeamID,
+		ChannelID:     cmd.ChannelID,
+		ChannelName:   cmd.ChannelName,
+		UserID:        cmd.UserID,
+		UserName:      cmd.UserName,
+		Text:          strings.TrimSpace(cmd.Text),
+		PostStarter:   true,
+		QuoteOriginal: true,
+	})
+}
+
+func (r *Runtime) startMentionConversation(ctx context.Context, req chatStartRequest) {
+	req.Text = stripBotMentions(req.Text, r.botUserID, r.cfg.BotUserTag)
+	req.PostStarter = false
+	req.QuoteOriginal = false
+	if req.ThreadTS == "" {
+		req.ThreadTS = req.MessageTS
+	}
+	r.startChatConversation(ctx, req)
+}
+
+func (r *Runtime) startChatConversation(ctx context.Context, req chatStartRequest) {
 	_ = r.repo.UpsertUser(ctx, postgres.User{
-		SlackUserID: cmd.UserID,
-		SlackTeamID: cmd.TeamID,
-		DisplayName: cmd.UserName,
+		SlackUserID: req.UserID,
+		SlackTeamID: req.TeamID,
+		DisplayName: req.UserName,
 	})
 	_ = r.repo.UpsertChannel(ctx, postgres.Channel{
-		SlackChannelID: cmd.ChannelID,
-		SlackTeamID:    cmd.TeamID,
-		Name:           cmd.ChannelName,
+		SlackChannelID: req.ChannelID,
+		SlackTeamID:    req.TeamID,
+		Name:           req.ChannelName,
 	})
-	_, _ = r.memory.Save(ctx, memory.Entry{
-		SlackTeamID:    cmd.TeamID,
-		SlackChannelID: cmd.ChannelID,
-		UserID:         cmd.UserID,
-		Content:        strings.TrimSpace(cmd.Text),
-	})
-
-	recent, _ := r.memory.Recent(ctx, cmd.TeamID, cmd.ChannelID, 5)
-	agentName, prompt := agents.ParseAgentDirective(strings.TrimSpace(cmd.Text))
-	starter := fmt.Sprintf("Hey <@%s>! I started a new Slacker thread. Reply in this thread to continue the conversation.", cmd.UserID)
-	_, threadTS, err := r.client.PostMessageContext(ctx, cmd.ChannelID, slack.MsgOptionText(starter, false))
-	if err != nil {
-		r.log.Error("post thread starter", "error", err)
-		return
+	if req.PostStarter && strings.TrimSpace(req.Text) != "" {
+		_, _ = r.memory.Save(ctx, memory.Entry{
+			SlackTeamID:    req.TeamID,
+			SlackChannelID: req.ChannelID,
+			UserID:         req.UserID,
+			Content:        strings.TrimSpace(req.Text),
+		})
 	}
-	sessionID := threadSessionID(cmd.TeamID, cmd.ChannelID, threadTS)
+
+	recent, _ := r.memory.Recent(ctx, req.TeamID, req.ChannelID, 5)
+	agentName, prompt := agents.ParseAgentDirective(strings.TrimSpace(req.Text))
+	threadTS := strings.TrimSpace(req.ThreadTS)
+	if req.PostStarter || threadTS == "" {
+		starter := fmt.Sprintf("Hey <@%s>! I started a new Slacker thread. Reply in this thread to continue the conversation.", req.UserID)
+		_, postedTS, err := r.client.PostMessageContext(ctx, req.ChannelID, slack.MsgOptionText(starter, false))
+		if err != nil {
+			r.log.Error("post thread starter", "error", err)
+			return
+		}
+		threadTS = postedTS
+	}
+	sessionID := threadSessionID(req.TeamID, req.ChannelID, threadTS)
 	if err := r.repo.UpsertChatThread(ctx, postgres.ChatThread{
-		SlackTeamID:    cmd.TeamID,
-		SlackChannelID: cmd.ChannelID,
+		SlackTeamID:    req.TeamID,
+		SlackChannelID: req.ChannelID,
 		SlackThreadTS:  threadTS,
 		SessionID:      sessionID,
-		CreatedBy:      cmd.UserID,
+		CreatedBy:      req.UserID,
 	}); err != nil {
 		r.log.Error("persist chat thread", "error", err, "thread_ts", threadTS)
 	}
-	if original := formatOriginalRequestQuote(prompt); original != "" {
-		_, _, err := r.client.PostMessageContext(
-			ctx,
-			cmd.ChannelID,
-			slack.MsgOptionText(original, false),
-			slack.MsgOptionTS(threadTS),
-		)
-		if err != nil {
-			r.log.Error("post original request quote", "error", err, "thread_ts", threadTS)
+	if req.QuoteOriginal {
+		if original := formatOriginalRequestQuote(prompt); original != "" {
+			_, _, err := r.client.PostMessageContext(
+				ctx,
+				req.ChannelID,
+				slack.MsgOptionText(original, false),
+				slack.MsgOptionTS(threadTS),
+			)
+			if err != nil {
+				r.log.Error("post original request quote", "error", err, "thread_ts", threadTS)
+			}
 		}
 	}
 
-	if err := r.postAgentResponseToThread(ctx, cmd.TeamID, cmd.ChannelID, cmd.UserID, threadTS, prompt, agentName, recent); err != nil {
-		r.log.Error("post slash response", "error", err)
+	if err := r.postAgentResponseToThread(ctx, req.TeamID, req.ChannelID, req.UserID, threadTS, prompt, agentName, recent); err != nil {
+		r.log.Error("post chat response", "error", err)
 	}
 }
 

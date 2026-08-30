@@ -25,7 +25,14 @@ This guide walks through creating and connecting a new Slack app for `slacker`.
 2. Under **Bot Token Scopes**, add at minimum:
    - `commands`
    - `chat:write`
+   - `app_mentions:read`
+   - `channels:history` (public channels)
+   - `groups:history` (private channels, if you mention the bot there)
 3. Add additional scopes only if your features require them.
+
+Also enable **Event Subscriptions** (Socket Mode) for:
+   - `app_mention`
+   - `message.channels`
 
 ## 4) Add slash commands
 
@@ -56,6 +63,7 @@ SLACK_APP_TOKEN=xapp-...
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_CHAT_COMMAND=/slacker
 SLACK_CONFIG_COMMAND=/slacker-config
+SLACK_BOT_USER_TAG=slacker-dev
 SLACK_ADMIN_USERS=U12345
 ```
 
