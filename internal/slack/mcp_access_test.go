@@ -13,7 +13,7 @@ func TestShouldTriggerMCPAccessFlowEmptyText(t *testing.T) {
 	t.Parallel()
 
 	r := &Runtime{}
-	if r.shouldTriggerMCPAccessFlow(context.Background(), "   ") {
+	if r.shouldTriggerMCPAccessFlow(context.Background(), "T1", "U1", "   ") {
 		t.Fatal("expected empty text not to trigger oauth flow")
 	}
 }
@@ -188,6 +188,52 @@ func TestFilterUnauthenticatedOAuthServers(t *testing.T) {
 	got = filterUnauthenticatedOAuthServers(servers, map[string]struct{}{}, []string{"github"})
 	if len(got) != 1 || got[0].Name != "github" {
 		t.Fatalf("expected only github when that is the needed server, got %#v", got)
+	}
+}
+
+func TestNeededOAuthMCPServersFromSkipsClassifierWhenAllConnected(t *testing.T) {
+	t.Parallel()
+
+	servers := []postgres.MCPServer{
+		{Name: "github", IssuerURL: "https://github.com/login/oauth", Enabled: true},
+		{Name: "atlassian", IssuerURL: "https://auth.atlassian.com", Enabled: true},
+	}
+	stub := &stubCompleter{reply: `{"needed":true,"servers":["github"]}`}
+	r := &Runtime{model: stub}
+
+	got := r.neededOAuthMCPServersFrom(context.Background(), "check open pull requests", servers, map[string]struct{}{
+		"github":    {},
+		"atlassian": {},
+	})
+	if len(got) != 0 {
+		t.Fatalf("expected no classification when all oauth servers are connected, got %v", got)
+	}
+	if stub.lastModel != "" {
+		t.Fatal("expected classifier not to run when the user already has valid oauth tokens")
+	}
+}
+
+func TestNeededOAuthMCPServersFromClassifiesOnlyUnauthenticated(t *testing.T) {
+	t.Parallel()
+
+	servers := []postgres.MCPServer{
+		{Name: "github", IssuerURL: "https://github.com/login/oauth", Enabled: true},
+		{Name: "atlassian", IssuerURL: "https://auth.atlassian.com", Enabled: true},
+	}
+	stub := &stubCompleter{reply: `{"needed":true,"servers":["atlassian"]}`}
+	r := &Runtime{model: stub}
+
+	got := r.neededOAuthMCPServersFrom(context.Background(), "create a Jira ticket", servers, map[string]struct{}{
+		"github": {},
+	})
+	if len(got) != 1 || got[0] != "atlassian" {
+		t.Fatalf("expected only unauthenticated server to be classified, got %v", got)
+	}
+	if strings.Contains(stub.lastUser, "github") {
+		t.Fatalf("expected classifier prompt to omit already-connected servers: %q", stub.lastUser)
+	}
+	if !strings.Contains(stub.lastUser, "atlassian") {
+		t.Fatalf("expected classifier prompt to include unauthenticated servers: %q", stub.lastUser)
 	}
 }
 

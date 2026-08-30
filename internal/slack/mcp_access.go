@@ -21,11 +21,11 @@ type llmCompleter interface {
 	Complete(ctx context.Context, modelName, system, user string) (string, error)
 }
 
-func (r *Runtime) shouldTriggerMCPAccessFlow(ctx context.Context, text string) bool {
-	return len(r.neededOAuthMCPServers(ctx, text)) > 0
+func (r *Runtime) shouldTriggerMCPAccessFlow(ctx context.Context, teamID, userID, text string) bool {
+	return len(r.neededOAuthMCPServers(ctx, teamID, userID, text)) > 0
 }
 
-func (r *Runtime) neededOAuthMCPServers(ctx context.Context, text string) []string {
+func (r *Runtime) neededOAuthMCPServers(ctx context.Context, teamID, userID, text string) []string {
 	text = strings.TrimSpace(text)
 	if text == "" || r == nil || r.repo == nil {
 		return nil
@@ -37,11 +37,22 @@ func (r *Runtime) neededOAuthMCPServers(ctx context.Context, text string) []stri
 		}
 		return nil
 	}
-	oauthServers := oauthEnabledMCPServers(servers)
-	if len(oauthServers) == 0 {
+	connected, err := r.repo.ListConnectedMCPServers(ctx, teamID, userID)
+	if err != nil {
+		if r.log != nil {
+			r.log.Error("failed listing connected MCP servers for access classification", "error", err, "team_id", teamID, "user_id", userID)
+		}
 		return nil
 	}
-	return r.classifyOAuthMCPAccess(ctx, text, oauthServers)
+	return r.neededOAuthMCPServersFrom(ctx, text, servers, connected)
+}
+
+func (r *Runtime) neededOAuthMCPServersFrom(ctx context.Context, text string, servers []postgres.MCPServer, connected map[string]struct{}) []string {
+	candidates := filterUnauthenticatedOAuthServers(servers, connected, nil)
+	if len(candidates) == 0 {
+		return nil
+	}
+	return r.classifyOAuthMCPAccess(ctx, text, candidates)
 }
 
 func (r *Runtime) classifyOAuthMCPAccess(ctx context.Context, text string, servers []postgres.MCPServer) []string {

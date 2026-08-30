@@ -255,17 +255,18 @@ func (r *Runtime) postAgentResponseToThread(
 		progress = nil
 	}
 
-	progress.Push("Checking whether this needs MCP access")
-	neededServers := r.neededOAuthMCPServers(ctx, prompt)
-	requestNeedsMCP := len(neededServers) > 0
+	progress.Push("Looking up your MCP connections")
+	candidates, accessErr := r.unauthenticatedOAuthServers(ctx, teamID, userID, nil)
+	if accessErr != nil {
+		r.log.Error("failed checking user MCP access", "error", accessErr, "team_id", teamID, "user_id", userID)
+	}
+	var neededServers []string
 	var missingServers []postgres.MCPServer
-	if requestNeedsMCP {
-		progress.Push("Looking up your MCP connections")
-		missing, accessErr := r.unauthenticatedOAuthServers(ctx, teamID, userID, neededServers)
-		if accessErr != nil {
-			r.log.Error("failed checking user MCP access", "error", accessErr, "team_id", teamID, "user_id", userID)
-		} else {
-			missingServers = missing
+	if len(candidates) > 0 {
+		progress.Push("Checking whether this needs MCP access")
+		neededServers = r.classifyOAuthMCPAccess(ctx, prompt, candidates)
+		if len(neededServers) > 0 {
+			missingServers = filterUnauthenticatedOAuthServers(candidates, nil, neededServers)
 		}
 	}
 
@@ -297,7 +298,7 @@ func (r *Runtime) postAgentResponseToThread(
 	}
 
 	if len(missingServers) > 0 {
-		if r.shouldTriggerMCPAccessFlow(ctx, resultText) || strings.Contains(strings.ToLower(resultText), "can't") || strings.Contains(strings.ToLower(resultText), "cannot") {
+		if strings.Contains(strings.ToLower(resultText), "can't") || strings.Contains(strings.ToLower(resultText), "cannot") || len(r.classifyOAuthMCPAccess(ctx, resultText, missingServers)) > 0 {
 			posted, promptErr := r.promptMissingMCPAccess(ctx, teamID, channelID, userID, threadTS, agentName, prompt, neededServers)
 			if promptErr != nil {
 				r.log.Error("failed to send MCP auth prompt after response", "error", promptErr, "user_id", userID)
