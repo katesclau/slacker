@@ -103,7 +103,7 @@ func main() {
 		ConfigCommand: cfg.Slack.ConfigCommand,
 		AdminUsers:    cfg.Slack.AdminUsers,
 		PublicBaseURL: cfg.App.PublicBaseURL,
-	}, log, repo, memorySvc, blockTools, agentRuntime)
+	}, log, repo, memorySvc, blockTools, agentRuntime, modelAdapter)
 
 	httpSrv := httpserver.New(
 		netAddr(cfg.App.Port),
