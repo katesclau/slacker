@@ -100,9 +100,7 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		}(*st)
 	}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`<!doctype html><html><body><p>OAuth authorization succeeded. Slacker will resume the original conversation if one is waiting.</p></body></html>`))
+	writeOAuthSuccess(w, server)
 }
 
 func (s *Server) lookupAuthService(ctx context.Context, name string) (*mcpauth.Service, error) {
