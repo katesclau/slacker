@@ -15,6 +15,11 @@ import (
 	"github.com/slack-go/slack"
 )
 
+const (
+	slackWriteTimeout     = 45 * time.Second
+	slackWriteMaxAttempts = 3
+)
+
 type chatStartRequest struct {
 	TeamID        string
 	ChannelID     string
@@ -194,11 +199,10 @@ func (r *Runtime) ResumeOAuthConversation(ctx context.Context, state mcpauth.OAu
 		return nil
 	}
 
-	_, _, err = r.client.PostMessageContext(
-		ctx,
+	err = r.postThreadTextWithRetry(
 		req.SlackChannelID,
-		slack.MsgOptionText(fmt.Sprintf("MCP access for `%s` is connected. Resuming the original request.", req.MCPServer), false),
-		slack.MsgOptionTS(req.SlackThreadTS),
+		req.SlackThreadTS,
+		fmt.Sprintf("MCP access for `%s` is connected. Resuming the original request.", req.MCPServer),
 	)
 	if err != nil {
 		return err
@@ -239,22 +243,29 @@ func (r *Runtime) postAgentResponseToThread(
 	agentName string,
 	recent []string,
 ) error {
-	thinkingText := ":hourglass_flowing_sand: Thinking..."
+	thinkingText := ":hourglass_flowing_sand: Working..."
 	_, thinkingTS, thinkingErr := r.client.PostMessageContext(
 		ctx,
 		channelID,
 		slack.MsgOptionText(thinkingText, false),
 		slack.MsgOptionTS(threadTS),
 	)
+	progress := newProgressPublisher(r, channelID, thinkingTS)
+	if thinkingErr != nil {
+		progress = nil
+	}
 
-	requestNeedsMCP := r.shouldTriggerMCPAccessFlow(ctx, prompt)
-	hasMCPAccess := false
+	progress.Push("Checking whether this needs MCP access")
+	neededServers := r.neededOAuthMCPServers(ctx, prompt)
+	requestNeedsMCP := len(neededServers) > 0
+	var missingServers []postgres.MCPServer
 	if requestNeedsMCP {
-		access, accessErr := r.repo.UserHasEnabledMCPAccess(ctx, teamID, userID)
+		progress.Push("Looking up your MCP connections")
+		missing, accessErr := r.unauthenticatedOAuthServers(ctx, teamID, userID, neededServers)
 		if accessErr != nil {
 			r.log.Error("failed checking user MCP access", "error", accessErr, "team_id", teamID, "user_id", userID)
 		} else {
-			hasMCPAccess = access
+			missingServers = missing
 		}
 	}
 
@@ -263,18 +274,20 @@ func (r *Runtime) postAgentResponseToThread(
 	startedAt := time.Now()
 	if r.agents != nil {
 		result, err := r.agents.Run(ctx, agents.RunRequest{
-			TeamID:    teamID,
-			UserID:    userID,
-			SessionID: sessionID,
-			Text:      prompt,
-			AgentName: agentName,
+			TeamID:     teamID,
+			UserID:     userID,
+			SessionID:  sessionID,
+			Text:       prompt,
+			AgentName:  agentName,
+			OnProgress: progress.Handle,
 		})
 		if err != nil {
 			resultText = fmt.Sprintf("Agent execution failed: %v", err)
 			if isMCPAuthError(err) {
-				if promptErr := r.postMCPAuthPromptEphemeral(ctx, teamID, channelID, userID, threadTS, agentName, prompt); promptErr != nil {
+				posted, promptErr := r.promptMissingMCPAccess(ctx, teamID, channelID, userID, threadTS, agentName, prompt, neededServers)
+				if promptErr != nil {
 					r.log.Error("failed to send MCP auth prompt", "error", promptErr, "user_id", userID)
-				} else {
+				} else if posted {
 					resultText = "MCP access is not connected for this user yet. I sent you a private message in this channel with connect links."
 				}
 			}
@@ -283,17 +296,19 @@ func (r *Runtime) postAgentResponseToThread(
 		}
 	}
 
-	if requestNeedsMCP && !hasMCPAccess {
+	if len(missingServers) > 0 {
 		if r.shouldTriggerMCPAccessFlow(ctx, resultText) || strings.Contains(strings.ToLower(resultText), "can't") || strings.Contains(strings.ToLower(resultText), "cannot") {
-			if promptErr := r.postMCPAuthPromptEphemeral(ctx, teamID, channelID, userID, threadTS, agentName, prompt); promptErr != nil {
+			posted, promptErr := r.promptMissingMCPAccess(ctx, teamID, channelID, userID, threadTS, agentName, prompt, neededServers)
+			if promptErr != nil {
 				r.log.Error("failed to send MCP auth prompt after response", "error", promptErr, "user_id", userID)
-			} else if !strings.Contains(strings.ToLower(resultText), "private message") {
+			} else if posted && !strings.Contains(strings.ToLower(resultText), "private message") {
 				resultText = strings.TrimSpace(resultText) + "\n\nI sent you a private message in this channel with MCP connect links."
 			}
 		}
 	}
 
 	_ = recent // retained for future memory-context UI; currently not rendered
+	progress.Flush()
 
 	resultText = strings.TrimSpace(resultText)
 	if resultText == "" {
@@ -301,27 +316,121 @@ func (r *Runtime) postAgentResponseToThread(
 	}
 	text, blocks := r.blockkit.ResolvePlaceholders(resultText)
 	uiBlocks := buildResponseUIBlocks(text, blocks, time.Since(startedAt))
+	return r.publishThreadReply(channelID, threadTS, thinkingTS, thinkingErr, text, uiBlocks)
+}
 
-	if thinkingErr == nil && strings.TrimSpace(thinkingTS) != "" {
-		updateOpts := []slack.MsgOption{
-			slack.MsgOptionText(text, false),
+func (r *Runtime) publishThreadReply(channelID, threadTS, thinkingTS string, thinkingErr error, text string, uiBlocks []slack.Block) error {
+	update := thinkingErr == nil && strings.TrimSpace(thinkingTS) != ""
+	var lastErr error
+	for attempt := 1; attempt <= slackWriteMaxAttempts; attempt++ {
+		err := r.writeThreadReply(channelID, threadTS, thinkingTS, update, text, uiBlocks)
+		if err == nil {
+			return nil
 		}
+		lastErr = err
+		if r.log != nil {
+			r.log.Error("slack thread publish failed", "attempt", attempt, "max_attempts", slackWriteMaxAttempts, "error", err)
+		}
+		if attempt == slackWriteMaxAttempts {
+			break
+		}
+		r.notifySlackRetry(channelID, threadTS, thinkingTS, update, attempt, err)
+		time.Sleep(slackRetryBackoff(attempt))
+	}
+	r.notifySlackRetryExhausted(channelID, threadTS, lastErr)
+	return lastErr
+}
+
+func (r *Runtime) writeThreadReply(channelID, threadTS, thinkingTS string, update bool, text string, uiBlocks []slack.Block) error {
+	if r.client == nil {
+		return fmt.Errorf("slack client is not configured")
+	}
+	ctx, cancel := slackWriteContext()
+	defer cancel()
+	if update {
+		opts := []slack.MsgOption{slack.MsgOptionText(text, false)}
 		if len(uiBlocks) > 0 {
-			updateOpts = append(updateOpts, slack.MsgOptionBlocks(uiBlocks...))
+			opts = append(opts, slack.MsgOptionBlocks(uiBlocks...))
 		}
-		_, _, _, err := r.client.UpdateMessageContext(ctx, channelID, thinkingTS, updateOpts...)
+		_, _, _, err := r.client.UpdateMessageContext(ctx, channelID, thinkingTS, opts...)
 		return err
 	}
-
-	msgOpts := []slack.MsgOption{
+	opts := []slack.MsgOption{
 		slack.MsgOptionText(text, false),
 		slack.MsgOptionTS(threadTS),
 	}
 	if len(uiBlocks) > 0 {
-		msgOpts = append(msgOpts, slack.MsgOptionBlocks(uiBlocks...))
+		opts = append(opts, slack.MsgOptionBlocks(uiBlocks...))
 	}
-	_, _, err := r.client.PostMessageContext(ctx, channelID, msgOpts...)
+	_, _, err := r.client.PostMessageContext(ctx, channelID, opts...)
 	return err
+}
+
+func (r *Runtime) postThreadTextWithRetry(channelID, threadTS, text string) error {
+	if r == nil || r.client == nil {
+		return fmt.Errorf("slack client is not configured")
+	}
+	var lastErr error
+	for attempt := 1; attempt <= slackWriteMaxAttempts; attempt++ {
+		ctx, cancel := slackWriteContext()
+		_, _, err := r.client.PostMessageContext(ctx, channelID, slack.MsgOptionText(text, false), slack.MsgOptionTS(threadTS))
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if attempt == slackWriteMaxAttempts {
+			break
+		}
+		r.notifySlackRetry(channelID, threadTS, "", false, attempt, err)
+		time.Sleep(slackRetryBackoff(attempt))
+	}
+	r.notifySlackRetryExhausted(channelID, threadTS, lastErr)
+	return lastErr
+}
+
+func (r *Runtime) notifySlackRetry(channelID, threadTS, thinkingTS string, update bool, attempt int, err error) {
+	msg := slackRetryFeedbackText(attempt, slackWriteMaxAttempts, err)
+	ctx, cancel := slackWriteContext()
+	defer cancel()
+	if update && strings.TrimSpace(thinkingTS) != "" {
+		_, _, _, _ = r.client.UpdateMessageContext(ctx, channelID, thinkingTS, slack.MsgOptionText(msg, false))
+	}
+	_, _, _ = r.client.PostMessageContext(ctx, channelID, slack.MsgOptionText(msg, false), slack.MsgOptionTS(threadTS))
+}
+
+func (r *Runtime) notifySlackRetryExhausted(channelID, threadTS string, err error) {
+	msg := slackRetryExhaustedText(slackWriteMaxAttempts, err)
+	ctx, cancel := slackWriteContext()
+	defer cancel()
+	_, _, _ = r.client.PostMessageContext(ctx, channelID, slack.MsgOptionText(msg, false), slack.MsgOptionTS(threadTS))
+}
+
+func slackRetryFeedbackText(attempt, maxAttempts int, err error) string {
+	reason := "unknown error"
+	if err != nil {
+		reason = err.Error()
+	}
+	return fmt.Sprintf(":warning: Slack did not accept the reply (%s). Retrying %d/%d...", reason, attempt, maxAttempts)
+}
+
+func slackRetryExhaustedText(maxAttempts int, err error) string {
+	reason := "unknown error"
+	if err != nil {
+		reason = err.Error()
+	}
+	return fmt.Sprintf(":x: Slack still failed after %d attempts: %s", maxAttempts, reason)
+}
+
+func slackRetryBackoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	return time.Duration(attempt) * 2 * time.Second
+}
+
+func slackWriteContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), slackWriteTimeout)
 }
 
 func threadSessionID(teamID, channelID, threadTS string) string {
@@ -342,24 +451,43 @@ func isMCPAuthError(err error) bool {
 		strings.Contains(msg, "oauth")
 }
 
-func (r *Runtime) postMCPAuthPromptEphemeral(ctx context.Context, teamID, channelID, userID, threadTS, agentName, prompt string) error {
+func (r *Runtime) unauthenticatedOAuthServers(ctx context.Context, teamID, userID string, needed []string) ([]postgres.MCPServer, error) {
+	if r == nil || r.repo == nil {
+		return nil, fmt.Errorf("repository is not configured")
+	}
+	servers, err := r.repo.ListMCPServers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	connected, err := r.repo.ListConnectedMCPServers(ctx, teamID, userID)
+	if err != nil {
+		return nil, err
+	}
+	return filterUnauthenticatedOAuthServers(servers, connected, needed), nil
+}
+
+func (r *Runtime) promptMissingMCPAccess(ctx context.Context, teamID, channelID, userID, threadTS, agentName, prompt string, needed []string) (bool, error) {
+	servers, err := r.unauthenticatedOAuthServers(ctx, teamID, userID, needed)
+	if err != nil {
+		return false, err
+	}
+	if len(servers) == 0 {
+		return false, nil
+	}
+	if err := r.postMCPAuthPromptEphemeral(ctx, teamID, channelID, userID, threadTS, agentName, prompt, servers); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (r *Runtime) postMCPAuthPromptEphemeral(ctx context.Context, teamID, channelID, userID, threadTS, agentName, prompt string, servers []postgres.MCPServer) error {
 	if deleted, err := r.repo.DeleteStaleMCPOAuthResumeRequests(ctx, time.Now().Add(-48*time.Hour)); err != nil {
 		r.log.Debug("failed to clean stale oauth resume requests", "error", err)
 	} else if deleted > 0 {
 		r.log.Debug("cleaned stale oauth resume requests", "deleted", deleted)
 	}
 
-	servers, err := r.repo.ListMCPServers(ctx)
-	if err != nil {
-		return err
-	}
-	enabled := make([]postgres.MCPServer, 0, len(servers))
-	for _, s := range servers {
-		if s.Enabled {
-			enabled = append(enabled, s)
-		}
-	}
-	if len(enabled) == 0 {
+	if len(servers) == 0 {
 		_, err := r.client.PostEphemeralContext(
 			ctx,
 			channelID,
@@ -370,8 +498,8 @@ func (r *Runtime) postMCPAuthPromptEphemeral(ctx context.Context, teamID, channe
 	}
 
 	var lines []string
-	buttons := make([]slack.BlockElement, 0, minInt(len(enabled), 5))
-	for i, server := range enabled {
+	buttons := make([]slack.BlockElement, 0, minInt(len(servers), 5))
+	for i, server := range servers {
 		requestID := uuid.NewString()
 		if err := r.repo.UpsertMCPOAuthResumeRequest(ctx, postgres.MCPOAuthResumeRequest{
 			RequestID:      requestID,
@@ -404,7 +532,7 @@ func (r *Runtime) postMCPAuthPromptEphemeral(ctx context.Context, teamID, channe
 			slack.NewSectionBlock(
 				slack.NewTextBlockObject(
 					slack.MarkdownType,
-					"*MCP access required*\nConnect at least one MCP server with your user identity.\n\n"+strings.Join(lines, "\n"),
+					"*MCP access required*\nConnect the MCP servers that are not yet authorized for your user.\n\n"+strings.Join(lines, "\n"),
 					false,
 					false,
 				),
@@ -420,7 +548,7 @@ func (r *Runtime) postMCPAuthPromptEphemeral(ctx context.Context, teamID, channe
 				slack.NewSectionBlock(
 					slack.NewTextBlockObject(
 						slack.MarkdownType,
-						"*MCP access required*\nConnect at least one MCP server with your user identity.",
+						"*MCP access required*\nConnect the MCP servers that are not yet authorized for your user.",
 						false,
 						false,
 					),
@@ -432,7 +560,7 @@ func (r *Runtime) postMCPAuthPromptEphemeral(ctx context.Context, teamID, channe
 		}
 	}
 
-	_, err = r.client.PostEphemeralContext(ctx, channelID, userID, opts...)
+	_, err := r.client.PostEphemeralContext(ctx, channelID, userID, opts...)
 	return err
 }
 

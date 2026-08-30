@@ -41,11 +41,12 @@ type Runtime struct {
 }
 
 type RunRequest struct {
-	TeamID    string
-	UserID    string
-	SessionID string
-	Text      string
-	AgentName string
+	TeamID     string
+	UserID     string
+	SessionID  string
+	Text       string
+	AgentName  string
+	OnProgress func(ProgressEvent)
 }
 
 type RunResult struct {
@@ -91,6 +92,11 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		"allowed_mcp_servers", strings.Join(def.MCPServers, ","),
 		"selected_mcp_servers", strings.Join(mcpServerNames(filteredServers), ","),
 	)
+	if names := mcpServerNames(filteredServers); len(names) > 0 {
+		req.reportProgress(ProgressEvent{Message: "Connecting MCP servers: " + strings.Join(names, ", ")})
+	} else {
+		req.reportProgress(ProgressEvent{Message: "No MCP servers enabled; answering without tools"})
+	}
 	mcpToolsets, err := mcpclient.Builder{
 		Servers:  filteredServers,
 		Resolver: r.resolver,
@@ -130,12 +136,14 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 
 	modelCtx := openaiadapter.WithModel(mcpclient.WithSlackIdentity(ctx, req.TeamID, req.UserID), def.Model)
 	slog.Debug("agent run started", "agent_name", def.Name, "team_id", req.TeamID, "user_id", req.UserID, "session_id", req.SessionID, "model_override", def.Model)
+	req.reportProgress(ProgressEvent{Message: "Asking the model what to do next"})
 	msg := &genai.Content{
 		Role:  genai.RoleUser,
 		Parts: []*genai.Part{{Text: req.Text}},
 	}
 
 	var out strings.Builder
+	announcedReply := false
 	for ev, runErr := range runnerInstance.Run(modelCtx, appUserID, req.SessionID, msg, agent.RunConfig{}) {
 		if runErr != nil {
 			slog.Debug("agent run failed", "agent_name", def.Name, "team_id", req.TeamID, "user_id", req.UserID, "session_id", req.SessionID, "error", runErr)
@@ -144,8 +152,15 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		if ev == nil || ev.Author == "user" || ev.Content == nil {
 			continue
 		}
+		for _, progress := range progressEventsFromSession(ev) {
+			req.reportProgress(progress)
+		}
 		for _, part := range ev.Content.Parts {
 			if part.Text != "" {
+				if !announcedReply {
+					req.reportProgress(ProgressEvent{Message: "Writing the reply"})
+					announcedReply = true
+				}
 				if out.Len() > 0 {
 					out.WriteString("\n")
 				}
@@ -162,6 +177,13 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		AgentName: def.Name,
 		Text:      out.String(),
 	}, nil
+}
+
+func (req RunRequest) reportProgress(ev ProgressEvent) {
+	if req.OnProgress == nil || strings.TrimSpace(ev.Message) == "" {
+		return
+	}
+	req.OnProgress(ev)
 }
 
 func countEnabledMCPServers(servers []postgres.MCPServer) int {

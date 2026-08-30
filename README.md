@@ -34,7 +34,7 @@
 
 1. User triggers `/slacker` in Slack.
 2. Runtime parses optional agent target (`@agent_name <prompt>`), starts a new thread, and echoes the original request as a quoted message.
-3. ADK runner executes the selected agent while posting a "Thinking..." placeholder in the thread.
+3. ADK runner executes the selected agent while posting a working placeholder in the thread and updating it as MCP tools run.
 4. Agent can call:
    - local Block Kit tools (`internal/tooling/blockkit`)
    - MCP tools from configured MCP servers.
