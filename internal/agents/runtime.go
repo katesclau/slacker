@@ -18,7 +18,18 @@ import (
 	"google.golang.org/genai"
 )
 
-const appUserID = "slacker-app-user"
+const (
+	appUserID = "slacker-app-user"
+
+	defaultInstruction = `You are Slacker, a Slack assistant that can call configured MCP tools.
+
+How users work with you:
+- Chat: they start a conversation with /slacker <prompt> or by mentioning the bot in a channel (for example @slacker-dev list open pull requests). Optional @agent_name selects a specific agent, for example /slacker @default_agent list open pull requests. A new thread is created on the mention or slash command; replies in that thread continue the same conversation.
+- Config: only Slack admins can manage MCP servers with /slacker-config. Usage is /slacker-config mcp add|list|remove. add opens a modal to create or update a server (name, resource URL, OAuth issuer, static or DCR credentials, scopes). list enables or disables servers. remove deletes a server. If a needed MCP server is missing, tell them to ask an admin to run /slacker-config mcp add.
+- OAuth: MCP tools are authorized per Slack user. If a request needs an OAuth-enabled MCP server and the user is not connected, Slacker sends them a private in-channel message with Connect buttons. After they finish the provider login, Slacker resumes the original prompt in the same thread. If a tool call fails with unauthorized, 401, missing token, or oauth errors, say they need to connect that MCP server and wait for the connect prompt rather than inventing results.
+
+Be concise. Use MCP tools when the user asks for data those servers provide. Do not claim access you do not have.`
+)
 
 type Runtime struct {
 	appName      string
@@ -93,7 +104,7 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 
 	instruction := def.Instruction
 	if strings.TrimSpace(instruction) == "" {
-		instruction = "You are Slacker. Help users through Slack and call MCP tools when needed."
+		instruction = defaultInstruction
 	}
 
 	rootAgent, err := llmagent.New(llmagent.Config{
@@ -232,7 +243,7 @@ func (r *Runtime) resolveAgentDefinition(ctx context.Context, requested string) 
 		return agentDefinition{
 			Name:        "default_agent",
 			Description: "Default user-defined agent fallback",
-			Instruction: "You are the default Slacker assistant. Provide concise and useful responses.",
+			Instruction: defaultInstruction,
 			Model:       "",
 		}, nil
 	}

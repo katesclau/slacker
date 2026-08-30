@@ -1,5 +1,9 @@
 # slacker
 
+<p align="center">
+  <img src="assets/icons/slacker.png" alt="Slacker hammock icon" width="160">
+</p>
+
 `slacker` is a Go Slack application that runs user-defined agents with Google ADK and allows those agents to call MCP servers via the MCP Go SDK.
 
 ## Architecture
@@ -47,6 +51,7 @@ Required groups:
   - `SLACK_BOT_TOKEN`
   - `SLACK_CHAT_COMMAND`
   - `SLACK_CONFIG_COMMAND`
+  - `SLACK_BOT_USER_TAG` (display name used for `@mention` thread starts, e.g. `slacker-dev`)
   - `SLACK_ADMIN_USERS`
 - **LLM**
   - `OPENAI_API_KEY`
@@ -90,7 +95,13 @@ Required groups:
 - Typical bot scopes:
   - `commands`
   - `chat:write`
+  - `app_mentions:read`
+  - `channels:history`
+  - `groups:history`
   - plus any read scopes you want for future event handling.
+- Event subscriptions (Socket Mode):
+  - `app_mention`
+  - `message.channels`
 
 ### 2) Configure `slacker`
 

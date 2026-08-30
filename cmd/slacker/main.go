@@ -101,6 +101,7 @@ func main() {
 		BotToken:      cfg.Slack.BotToken,
 		ChatCommand:   cfg.Slack.ChatCommand,
 		ConfigCommand: cfg.Slack.ConfigCommand,
+		BotUserTag:    cfg.Slack.BotUserTag,
 		AdminUsers:    cfg.Slack.AdminUsers,
 		PublicBaseURL: cfg.App.PublicBaseURL,
 	}, log, repo, memorySvc, blockTools, agentRuntime, modelAdapter)

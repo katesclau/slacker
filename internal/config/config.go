@@ -33,6 +33,7 @@ type SlackConfig struct {
 	BotToken      string
 	ChatCommand   string
 	ConfigCommand string
+	BotUserTag    string
 	AdminUsers    []string
 }
 
@@ -82,6 +83,7 @@ func Load() (Config, error) {
 			BotToken:      getEnv("SLACK_BOT_TOKEN", ""),
 			ChatCommand:   getEnv("SLACK_CHAT_COMMAND", "/slacker"),
 			ConfigCommand: getEnv("SLACK_CONFIG_COMMAND", "/slacker-config"),
+			BotUserTag:    normalizeBotUserTag(getEnv("SLACK_BOT_USER_TAG", "")),
 			AdminUsers:    splitCSV(getEnv("SLACK_ADMIN_USERS", "")),
 		},
 		OpenAI: OpenAIConfig{
@@ -173,6 +175,10 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+func normalizeBotUserTag(tag string) string {
+	return strings.TrimPrefix(strings.TrimSpace(tag), "@")
 }
 
 func getEnv(key string, fallback string) string {

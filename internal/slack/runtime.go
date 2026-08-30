@@ -23,20 +23,22 @@ type Config struct {
 	BotToken      string
 	ChatCommand   string
 	ConfigCommand string
+	BotUserTag    string
 	AdminUsers    []string
 	PublicBaseURL string
 }
 
 type Runtime struct {
-	cfg      Config
-	log      *slog.Logger
-	client   *slack.Client
-	socket   *socketmode.Client
-	repo     *postgres.Repository
-	memory   *memory.Service
-	blockkit *blockkit.Tools
-	agents   *agents.Runtime
-	model    llmCompleter
+	cfg       Config
+	log       *slog.Logger
+	client    *slack.Client
+	socket    *socketmode.Client
+	repo      *postgres.Repository
+	memory    *memory.Service
+	blockkit  *blockkit.Tools
+	agents    *agents.Runtime
+	model     llmCompleter
+	botUserID string
 
 	processedMu       sync.Mutex
 	processedMessages map[string]time.Time
@@ -91,6 +93,14 @@ func (r *Runtime) consumeEvents(ctx context.Context) {
 }
 
 func (r *Runtime) Start(ctx context.Context) error {
+	authCtx, authCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer authCancel()
+	if identity, err := r.client.AuthTestContext(authCtx); err != nil {
+		r.log.Error("failed to resolve slack bot user id", "error", err)
+	} else {
+		r.botUserID = strings.TrimSpace(identity.UserID)
+		r.log.Info("resolved slack bot identity", "bot_user_id", r.botUserID, "bot_user_tag", r.cfg.BotUserTag)
+	}
 	go r.consumeEvents(ctx)
 	r.log.Info("slack socket mode starting")
 	return r.socket.Run()
@@ -106,61 +116,99 @@ func (r *Runtime) handleSlashCommand(ctx context.Context, cmd slack.SlashCommand
 }
 
 func (r *Runtime) handleEventsAPI(ctx context.Context, evt slackevents.EventsAPIEvent) {
-	inner, ok := evt.InnerEvent.Data.(*slackevents.MessageEvent)
-	if !ok {
+	switch inner := evt.InnerEvent.Data.(type) {
+	case *slackevents.AppMentionEvent:
+		r.handleAppMention(ctx, evt, inner)
+	case *slackevents.MessageEvent:
+		r.handleMessageEvent(ctx, evt, inner)
+	}
+}
+
+func (r *Runtime) handleAppMention(ctx context.Context, evt slackevents.EventsAPIEvent, inner *slackevents.AppMentionEvent) {
+	if inner == nil || inner.BotID != "" {
 		return
 	}
-	if inner.BotID != "" {
+	teamID := strings.TrimSpace(evt.TeamID)
+	if teamID == "" {
+		teamID = strings.TrimSpace(inner.UserTeam)
+	}
+	r.handleUserPrompt(ctx, chatStartRequest{
+		TeamID:      teamID,
+		ChannelID:   inner.Channel,
+		UserID:      inner.User,
+		Text:        inner.Text,
+		MessageTS:   inner.TimeStamp,
+		ThreadTS:    inner.ThreadTimeStamp,
+		FromMention: true,
+	})
+}
+
+func (r *Runtime) handleMessageEvent(ctx context.Context, evt slackevents.EventsAPIEvent, inner *slackevents.MessageEvent) {
+	if inner == nil || inner.BotID != "" || inner.SubType != "" {
 		return
 	}
-	if inner.SubType != "" {
+	r.handleUserPrompt(ctx, chatStartRequest{
+		TeamID:    resolveTeamID(evt, inner),
+		ChannelID: inner.Channel,
+		UserID:    inner.User,
+		Text:      inner.Text,
+		MessageTS: inner.TimeStamp,
+		ThreadTS:  inner.ThreadTimeStamp,
+	})
+}
+
+func (r *Runtime) handleUserPrompt(ctx context.Context, req chatStartRequest) {
+	req.Text = strings.TrimSpace(req.Text)
+	if req.Text == "" {
 		return
 	}
-	channel := inner.Channel
-	teamID := resolveTeamID(evt, inner)
-	user := inner.User
-	text := strings.TrimSpace(inner.Text)
-	if text == "" {
+	if req.TeamID == "" || req.ChannelID == "" || req.UserID == "" {
+		r.log.Debug("ignoring event missing identifiers", "team_id", req.TeamID, "channel", req.ChannelID, "user", req.UserID)
 		return
 	}
-	if teamID == "" || channel == "" || user == "" {
-		r.log.Debug("ignoring message event missing identifiers", "team_id", teamID, "channel", channel, "user", user)
-		return
-	}
-	if inner.TimeStamp != "" {
-		eventKey := fmt.Sprintf("%s:%s:%s", teamID, channel, inner.TimeStamp)
+	if req.MessageTS != "" {
+		eventKey := fmt.Sprintf("%s:%s:%s", req.TeamID, req.ChannelID, req.MessageTS)
 		if !r.markMessageAsNew(eventKey) {
 			r.log.Debug("skipping duplicate message event", "event_key", eventKey)
 			return
 		}
 	}
+
 	_, _ = r.memory.Save(ctx, memory.Entry{
-		SlackTeamID:    teamID,
-		SlackChannelID: channel,
-		UserID:         user,
-		Content:        text,
+		SlackTeamID:    req.TeamID,
+		SlackChannelID: req.ChannelID,
+		UserID:         req.UserID,
+		Content:        req.Text,
 	})
 
-	if inner.ThreadTimeStamp == "" {
-		return
+	if req.ThreadTS != "" {
+		if r.continueKnownThread(ctx, req) {
+			return
+		}
 	}
-	if r.agents == nil {
-		return
+	if req.FromMention || mentionsBot(req.Text, r.botUserID, r.cfg.BotUserTag) {
+		r.startMentionConversation(ctx, req)
 	}
-	thread, err := r.repo.GetChatThread(ctx, teamID, channel, inner.ThreadTimeStamp)
+}
+
+func (r *Runtime) continueKnownThread(ctx context.Context, req chatStartRequest) bool {
+	if r.agents == nil || r.repo == nil {
+		return false
+	}
+	thread, err := r.repo.GetChatThread(ctx, req.TeamID, req.ChannelID, req.ThreadTS)
 	if err != nil {
-		r.log.Error("failed to load chat thread mapping", "error", err, "team_id", teamID, "channel_id", channel, "thread_ts", inner.ThreadTimeStamp)
-		return
+		r.log.Error("failed to load chat thread mapping", "error", err, "team_id", req.TeamID, "channel_id", req.ChannelID, "thread_ts", req.ThreadTS)
+		return true
 	}
 	if thread == nil {
-		r.log.Debug("thread message does not match known slacker thread", "thread_ts", inner.ThreadTimeStamp)
-		return
+		r.log.Debug("thread message does not match known slacker thread", "thread_ts", req.ThreadTS)
+		return false
 	}
-
-	recent, _ := r.memory.Recent(ctx, teamID, channel, 5)
-	if err := r.postAgentResponseToThread(ctx, teamID, channel, user, inner.ThreadTimeStamp, text, "", recent); err != nil {
+	recent, _ := r.memory.Recent(ctx, req.TeamID, req.ChannelID, 5)
+	if err := r.postAgentResponseToThread(ctx, req.TeamID, req.ChannelID, req.UserID, req.ThreadTS, stripBotMentions(req.Text, r.botUserID, r.cfg.BotUserTag), "", recent); err != nil {
 		r.log.Error("post threaded agent response", "error", err, "session_id", thread.SessionID)
 	}
+	return true
 }
 
 func resolveTeamID(evt slackevents.EventsAPIEvent, inner *slackevents.MessageEvent) string {

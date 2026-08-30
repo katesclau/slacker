@@ -11,7 +11,7 @@ exclude_file = []
 delay = 300
 stop_on_error = true
 send_interrupt = true
-kill_delay = 500
+kill_delay = 2000
 log = "build-errors.log"
 
 [color]
