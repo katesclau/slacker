@@ -48,7 +48,7 @@ func (r *Runtime) respondChat(ctx context.Context, cmd slack.SlashCommand) {
 }
 
 func (r *Runtime) startMentionConversation(ctx context.Context, req chatStartRequest) {
-	req.Text = stripBotMentions(req.Text, r.botUserID, r.cfg.BotUserTag)
+	req.Text = stripBotMentions(req.Text, r.slackBotUserID(), r.cfg.BotUserTag)
 	req.PostStarter = false
 	req.QuoteOriginal = false
 	if req.ThreadTS == "" {

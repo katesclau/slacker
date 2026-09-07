@@ -93,17 +93,53 @@ func (r *Runtime) consumeEvents(ctx context.Context) {
 }
 
 func (r *Runtime) Start(ctx context.Context) error {
-	authCtx, authCancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer authCancel()
-	if identity, err := r.client.AuthTestContext(authCtx); err != nil {
-		r.log.Error("failed to resolve slack bot user id", "error", err)
-	} else {
-		r.botUserID = strings.TrimSpace(identity.UserID)
-		r.log.Info("resolved slack bot identity", "bot_user_id", r.botUserID, "bot_user_tag", r.cfg.BotUserTag)
-	}
+	go r.resolveBotIdentity(ctx)
 	go r.consumeEvents(ctx)
 	r.log.Info("slack socket mode starting")
 	return r.socket.Run()
+}
+
+func (r *Runtime) resolveBotIdentity(ctx context.Context) {
+	const (
+		maxAttempts = 5
+		timeout     = 20 * time.Second
+	)
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return
+		}
+		authCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		identity, err := r.client.AuthTestContext(authCtx)
+		cancel()
+		if err == nil {
+			botUserID := strings.TrimSpace(identity.UserID)
+			r.setBotUserID(botUserID)
+			r.log.Info("resolved slack bot identity", "bot_user_id", botUserID, "bot_user_tag", r.cfg.BotUserTag)
+			return
+		}
+		r.log.Warn("slack auth.test failed", "attempt", attempt, "max_attempts", maxAttempts, "error", err)
+		if attempt == maxAttempts {
+			r.log.Error("failed to resolve slack bot user id", "error", err)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Duration(attempt) * 2 * time.Second):
+		}
+	}
+}
+
+func (r *Runtime) setBotUserID(id string) {
+	r.processedMu.Lock()
+	r.botUserID = id
+	r.processedMu.Unlock()
+}
+
+func (r *Runtime) slackBotUserID() string {
+	r.processedMu.Lock()
+	defer r.processedMu.Unlock()
+	return r.botUserID
 }
 
 func (r *Runtime) handleSlashCommand(ctx context.Context, cmd slack.SlashCommand) {
@@ -186,7 +222,7 @@ func (r *Runtime) handleUserPrompt(ctx context.Context, req chatStartRequest) {
 			return
 		}
 	}
-	if req.FromMention || mentionsBot(req.Text, r.botUserID, r.cfg.BotUserTag) {
+	if req.FromMention || mentionsBot(req.Text, r.slackBotUserID(), r.cfg.BotUserTag) {
 		r.startMentionConversation(ctx, req)
 	}
 }
@@ -205,7 +241,7 @@ func (r *Runtime) continueKnownThread(ctx context.Context, req chatStartRequest)
 		return false
 	}
 	recent, _ := r.memory.Recent(ctx, req.TeamID, req.ChannelID, 5)
-	if err := r.postAgentResponseToThread(ctx, req.TeamID, req.ChannelID, req.UserID, req.ThreadTS, stripBotMentions(req.Text, r.botUserID, r.cfg.BotUserTag), "", recent); err != nil {
+	if err := r.postAgentResponseToThread(ctx, req.TeamID, req.ChannelID, req.UserID, req.ThreadTS, stripBotMentions(req.Text, r.slackBotUserID(), r.cfg.BotUserTag), "", recent); err != nil {
 		r.log.Error("post threaded agent response", "error", err, "session_id", thread.SessionID)
 	}
 	return true
