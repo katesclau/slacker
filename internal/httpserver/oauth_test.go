@@ -90,6 +90,20 @@ func TestOAuthStartAndCallbackHandlers(t *testing.T) {
 	if cbRes.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", cbRes.Code)
 	}
+	body := cbRes.Body.String()
+	if !strings.Contains(body, "You're connected") || !strings.Contains(body, "demo") || !strings.Contains(body, "data:image/png;base64,") {
+		t.Fatalf("expected branded oauth success page, got %q", body)
+	}
+}
+
+func TestRenderOAuthSuccessEscapesServerName(t *testing.T) {
+	got := string(renderOAuthSuccess(`<script>alert("x")</script>`))
+	if strings.Contains(got, `<script>alert("x")</script>`) {
+		t.Fatal("expected server name to be html-escaped")
+	}
+	if !strings.Contains(got, "You're connected") {
+		t.Fatalf("expected success heading, got %q", got)
+	}
 }
 
 func TestOAuthCallbackTriggersResumeHandler(t *testing.T) {
