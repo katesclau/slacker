@@ -1,0 +1,24 @@
+# docker-compose.yml images are deliberately not tracked: local dev infrastructure, not
+# shipped, and `go test ./...` never touches it.
+version: 2
+updates:
+  # One grouped PR per ecosystem per week, each gated by the `build` job in ci.yml.
+  # Grouping keeps this to two reviewable PRs instead of one per module. The cost is that
+  # a single broken module reds the whole group; fix that by excluding the module from the
+  # group, not by dropping grouping.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      go:
+        patterns: ["*"]
+
+  # Keeps the action SHAs pinned in .github/workflows/ci.yml current.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

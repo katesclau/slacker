@@ -81,6 +81,10 @@ Required groups:
 5. Verify health:
    - `curl http://localhost:8080/health`
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for what CI checks and how dependency updates work.
+
 ## How to connect to Slack
 
 ### 1) Create and configure Slack app
