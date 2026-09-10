@@ -14,7 +14,7 @@ require (
 	github.com/sirupsen/logrus v1.10.2
 	github.com/slack-go/slack v0.29.0
 	google.golang.org/adk/v2 v2.3.0
-	google.golang.org/genai v1.69.0
+	google.golang.org/genai v1.71.0
 )
 
 require (
