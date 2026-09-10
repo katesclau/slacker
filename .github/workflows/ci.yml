@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - run: go build ./...
+      - run: go test ./...
+
+  # Auto-merge is opt-in. Uncomment to let Dependabot squash-merge its own PRs once
+  # `build` is green -- `needs: [build]` is what enforces that ordering, so keep it.
+  # Dependabot-triggered runs start with a read-only GITHUB_TOKEN; the permissions block
+  # below raises it. No secret, PAT or GitHub App is required.
+  # dependabot-automerge:
+  #   needs: [build]
+  #   if: github.event_name == 'pull_request' && github.actor == 'dependabot[bot]'
+  #   runs-on: ubuntu-latest
+  #   permissions:
+  #     contents: write
+  #     pull-requests: write
+  #   steps:
+  #     - run: gh pr merge --squash "$PR_URL"
+  #       env:
+  #         PR_URL: ${{ github.event.pull_request.html_url }}
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
