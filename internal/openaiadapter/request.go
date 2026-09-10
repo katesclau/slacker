@@ -91,7 +91,7 @@ func getRequestContentItems(content *genai.Content) []responses.ResponseInputIte
 		}
 		if part.FunctionResponse != nil {
 			item.OfFunctionCallOutput = &responses.ResponseInputItemFunctionCallOutputParam{
-				CallID: part.FunctionResponse.ID,
+				CallID: param.NewOpt(part.FunctionResponse.ID),
 				Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
 					OfString: param.NewOpt(marshalOutput(part.FunctionResponse.Response)),
 				},
